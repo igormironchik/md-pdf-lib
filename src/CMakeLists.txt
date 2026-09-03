@@ -34,8 +34,7 @@ qt6_add_resources(LIB_SRC ../3rdparty/MicroTeX/latex.qrc)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/MicroTeX/src
-	${CMAKE_CURRENT_BINARY_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/Skia)
+	${CMAKE_CURRENT_BINARY_DIR})
 
 add_definitions(-DBUILD_QT)
 
@@ -72,6 +71,9 @@ target_link_libraries(md-pdf-lib
     zlib
     ${PLATFORM_LIBS}
     ZLIB::ZLIB)
+
+target_include_directories(md-pdf-lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/Skia
+    ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty)
 
 find_program(SYSTEM_GN gn)
 
