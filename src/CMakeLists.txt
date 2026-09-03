@@ -73,7 +73,8 @@ target_link_libraries(md-pdf-lib
     ZLIB::ZLIB)
 
 target_include_directories(md-pdf-lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/Skia
-    ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty
+    ${CMAKE_CURRENT_SOURCE_DIR})
 
 find_program(SYSTEM_GN gn)
 
