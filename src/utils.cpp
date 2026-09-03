@@ -37,6 +37,12 @@
 #include <md4qt/src/underline_emphasis_parser.h>
 #include <md4qt/src/yaml_parser.h>
 
+void mdPdf_initSharedResources()
+{
+    Q_INIT_RESOURCE(resources);
+    Q_INIT_RESOURCE(latex);
+}
+
 namespace MdPdf
 {
 
@@ -66,8 +72,7 @@ Utf8String::operator std::string_view() const
 
 void initSharedResources()
 {
-    Q_INIT_RESOURCE(resources);
-    Q_INIT_RESOURCE(latex);
+    mdPdf_initSharedResources();
     Syntax::init();
 }
 
