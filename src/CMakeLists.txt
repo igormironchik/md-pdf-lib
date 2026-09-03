@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Igor Mironchik <igor.mironchik@gmail.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-project(md-pdf-lib)
-
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
