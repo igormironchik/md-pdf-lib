@@ -69,6 +69,7 @@ endif()
 
 if (NOT TARGET md4qt::md4qt)
     set(BUILD_MD4QT_TESTS OFF CACHE INTERNAL "" FORCE)
+    set(INSTALL_MD4QT OFF CACHE INTERNAL "" FORCE)
     add_subdirectory(3rdparty/md4qt)
 
     include_directories(${md4qt_INCLUDE_DIRECTORIES}/../..)
