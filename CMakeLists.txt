@@ -63,18 +63,19 @@ endif()
 
 set(_DISABLE_INSTALLATION TRUE)
 
-add_subdirectory(3rdparty/MicroTeX)
+if (NOT TARGET LaTeX)
+    add_subdirectory(3rdparty/MicroTeX)
+endif()
 
-set(BUILD_MD4QT_TESTS OFF CACHE INTERNAL "" FORCE)
-add_subdirectory(3rdparty/md4qt)
+if (NOT TARGET md4qt::md4qt)
+    set(BUILD_MD4QT_TESTS OFF CACHE INTERNAL "" FORCE)
+    add_subdirectory(3rdparty/md4qt)
 
-include_directories(${md4qt_INCLUDE_DIRECTORIES}/../..)
+    include_directories(${md4qt_INCLUDE_DIRECTORIES}/../..)
+
+    set(md4qt_VERSION_STRING "${md4qt_VERSION_STRING}" PARENT_SCOPE)
+endif()
 
 set(_DISABLE_INSTALLATION FALSE)
-
-set(md4qt_VERSION_STRING "${md4qt_VERSION_STRING}" PARENT_SCOPE)
-
-string(REPLACE "/DNDEBUG" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
-string(REPLACE "-DNDEBUG" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
 
 add_subdirectory(src)

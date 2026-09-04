@@ -113,7 +113,6 @@ else()
         md-pdf-lib-test-consts)
 endif()
 
-
 find_program(SYSTEM_GN gn)
 
 if(SYSTEM_GN)
