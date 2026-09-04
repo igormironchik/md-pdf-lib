@@ -137,8 +137,14 @@ else()
     set(FETCH_GN_COMMAND COMMAND python3 bin/fetch-gn)
 endif()
 
+if (TARGET md-pdf-lib)
+    set(SKIA_TARGET md-pdf-lib)
+else()
+    set(SKIA_TARGET md-pdf-lib-test)
+endif()
+
 add_custom_command(
-    TARGET md-pdf-lib
+    TARGET ${SKIA_TARGET}
     PRE_BUILD
     COMMAND ${FETCH_GN_COMMAND}
     COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_use_system_expat=false skia_use_system_harfbuzz=false skia_use_system_icu=false skia_use_system_libjpeg_turbo=false skia_use_system_libpng=false skia_use_system_libwebp=false skia_use_system_zlib=false extra_cflags=[\"${SKIA_CFLAGS}\"]"
