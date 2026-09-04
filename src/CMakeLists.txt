@@ -47,6 +47,8 @@ link_directories(${MD_PDF_SKIA_BUILD_PATH})
 if (NOT BUILD_TEST_LIBRARY)
     add_library(md-pdf-lib STATIC ${LIB_SRC})
 
+    set(SKIA_TARGET "md-pdf-lib")
+
     target_link_libraries(md-pdf-lib
         md4qt::md4qt
         LaTeX
@@ -80,6 +82,8 @@ else()
     find_package(Qt6 REQUIRED COMPONENTS Test)
 
     add_library(md-pdf-lib-test STATIC ${LIB_SRC})
+
+    set(SKIA_TARGET "md-pdf-lib-test")
 
     target_compile_definitions(md-pdf-lib-test PUBLIC MD_PDF_TESTING)
 
@@ -135,12 +139,6 @@ if(SYSTEM_GN)
 else()
     set(GN_EXEC "bin/gn")
     set(FETCH_GN_COMMAND COMMAND python3 bin/fetch-gn)
-endif()
-
-if (TARGET md-pdf-lib)
-    set(SKIA_TARGET md-pdf-lib)
-else()
-    set(SKIA_TARGET md-pdf-lib-test)
 endif()
 
 add_custom_command(
