@@ -44,37 +44,75 @@ endif()
 
 link_directories(${MD_PDF_SKIA_BUILD_PATH})
 
-add_library(md-pdf-lib STATIC ${LIB_SRC})
+if (NOT BUILD_TEST_LIBRARY)
+    add_library(md-pdf-lib STATIC ${LIB_SRC})
 
-target_link_libraries(md-pdf-lib
-    md4qt::md4qt
-    LaTeX
-    KF${KF_MAJOR_VERSION}::SyntaxHighlighting
-    Qt6::Network
-    Qt6::Core
-    bentleyottmann
-    compression_utils_portable
-    skresources
-    skcms
-    skottie
-    skparagraph
-    sksg
-    svg
-    wuffs
-    skshaper
-    skunicode_icu
-    skunicode_core
-    skia
-    expat
-    harfbuzz
-    icu
-    zlib
-    ${PLATFORM_LIBS}
-    ZLIB::ZLIB)
+    target_link_libraries(md-pdf-lib
+        md4qt::md4qt
+        LaTeX
+        KF${KF_MAJOR_VERSION}::SyntaxHighlighting
+        Qt6::Network
+        Qt6::Core
+        bentleyottmann
+        compression_utils_portable
+        skresources
+        skcms
+        skottie
+        skparagraph
+        sksg
+        svg
+        wuffs
+        skshaper
+        skunicode_icu
+        skunicode_core
+        skia
+        expat
+        harfbuzz
+        icu
+        zlib
+        ${PLATFORM_LIBS}
+        ZLIB::ZLIB)
 
-target_include_directories(md-pdf-lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/Skia
-    ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty
-    ${CMAKE_CURRENT_SOURCE_DIR})
+    target_include_directories(md-pdf-lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/Skia
+        ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty
+        ${CMAKE_CURRENT_SOURCE_DIR})
+else()
+    find_package(Qt6 REQUIRED COMPONENTS Test)
+
+    add_library(md-pdf-lib-test STATIC ${LIB_SRC})
+
+    target_compile_definitions(md-pdf-lib-test PUBLIC MD_PDF_TESTING)
+
+    target_link_libraries(md-pdf-lib-test
+        md4qt::md4qt
+        markdown-widgets
+        LaTeX
+        ${ADDITIONAL_KDE_TARGETS}
+        Qt6::Network
+        Qt6::Core
+        bentleyottmann
+        compression_utils_portable
+        skresources
+        skcms
+        skottie
+        skparagraph
+        sksg
+        svg
+        wuffs
+        skshaper
+        skunicode_icu
+        skunicode_core
+        skia
+        expat
+        harfbuzz
+        icu
+        zlib
+        ${PLATFORM_LIBS}
+        ZLIB::ZLIB
+        Qt6::Test
+        md-pdf-lib-test-consts)
+endif()
+
 
 find_program(SYSTEM_GN gn)
 

@@ -5,6 +5,8 @@ cmake_minimum_required(VERSION 3.19)
 
 project(md-pdf-lib)
 
+option(BUILD_TEST_LIBRARY "Build test library? Default OFF." OFF)
+
 set(KF_MIN_VERSION "6")
 set(KF_MAJOR_VERSION "6")
 
