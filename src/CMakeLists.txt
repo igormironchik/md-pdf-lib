@@ -5,14 +5,6 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-if(WIN32)
-    if(CMAKE_BUILD_TYPE STREQUAL "Release")
-        set(SKIA_CFLAGS "/MD")
-    else()
-        set(SKIA_CFLAGS "/MDd")
-    endif()
-endif()
-
 set(LIB_SRC skia_paintdevice.h
     skia_paintdevice.cpp
     renderer.h
@@ -48,10 +40,29 @@ if (UNIX)
     find_package(ICU REQUIRED COMPONENTS uc)
     find_package(WebP REQUIRED)
     find_package(harfbuzz REQUIRED)
+
     list(APPEND PLATFORM_LIBS WebP::webpdemux WebP::webp harfbuzz::harfbuzz harfbuzz::subset)
+
     set (ICU_LIBS ICU::uc)
 else()
     set(ICU_LIBS icu)
+
+    get_target_property(ZLIB_INCLUDE_DIR ZLIB::ZLIB INTERFACE_INCLUDE_DIRECTORIES)
+    get_target_property(ZLIB_COMPILE_OPTS ZLIB::ZLIB INTERFACE_COMPILE_OPTIONS)
+    get_target_property(ZLIB_LINK_LIBS ZLIB::ZLIB INTERFACE_LINK_LIBRARIES)
+
+    if(NOT ZLIB_COMPILE_OPTS)
+        set(ZLIB_COMPILE_OPTS "")
+    endif()
+
+    set(SKIA_CFLAGS "-I${ZLIB_INCLUDE_DIR}")
+    set(SKIA_LDFLAGS "${ZLIB_LIBRARY}")
+
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+        list(APPEND SKIA_CFLAGS "/MD")
+    else()
+        list(APPEND SKIA_CFLAGS "/MDd")
+    endif()
 endif()
 
 if (NOT BUILD_TEST_LIBRARY)
@@ -152,7 +163,7 @@ if(WIN32)
         TARGET ${SKIA_TARGET}
         PRE_BUILD
         COMMAND ${FETCH_GN_COMMAND}
-        COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_use_system_expat=false skia_use_system_harfbuzz=false skia_use_system_icu=false skia_use_system_libjpeg_turbo=false skia_use_system_libpng=false skia_use_system_libwebp=false skia_use_system_zlib=true extra_cflags=[\"${SKIA_CFLAGS}\"]"
+        COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_use_system_expat=false skia_use_system_harfbuzz=false skia_use_system_icu=false skia_use_system_libjpeg_turbo=false skia_use_system_libpng=false skia_use_system_libwebp=false skia_use_system_zlib=true extra_cflags=[\"${SKIA_CFLAGS}\"] extra_ldflags=[\"${SKIA_LDFLAGS}\"]"
         COMMAND ninja -C "${MD_PDF_SKIA_BUILD_PATH}"
         COMMENT "Configuring and building Skia..."
         VERBATIM
@@ -165,7 +176,7 @@ else()
         TARGET ${SKIA_TARGET}
         PRE_BUILD
         COMMAND ${FETCH_GN_COMMAND}
-        COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_use_system_expat=true skia_use_system_harfbuzz=true skia_use_system_icu=true skia_use_system_libjpeg_turbo=true skia_use_system_libpng=true skia_use_system_libwebp=true skia_use_system_zlib=true extra_cflags=[\"${SKIA_CFLAGS}\"]"
+        COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_use_system_expat=true skia_use_system_harfbuzz=true skia_use_system_icu=true skia_use_system_libjpeg_turbo=true skia_use_system_libpng=true skia_use_system_libwebp=true skia_use_system_zlib=true extra_cflags=[\"${SKIA_CFLAGS}\"] extra_ldflags=[\"${SKIA_LDFLAGS}\"]"
         COMMAND ninja -C "${MD_PDF_SKIA_BUILD_PATH}"
         COMMENT "Configuring and building Skia..."
         VERBATIM
