@@ -141,13 +141,28 @@ else()
     set(FETCH_GN_COMMAND COMMAND python3 bin/fetch-gn)
 endif()
 
-add_custom_command(
-    TARGET ${SKIA_TARGET}
-    PRE_BUILD
-    COMMAND ${FETCH_GN_COMMAND}
-    COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_use_system_expat=false skia_use_system_harfbuzz=false skia_use_system_icu=false skia_use_system_libjpeg_turbo=false skia_use_system_libpng=false skia_use_system_libwebp=false skia_use_system_zlib=false extra_cflags=[\"${SKIA_CFLAGS}\"]"
-    COMMAND ninja -C "${MD_PDF_SKIA_BUILD_PATH}"
-    COMMENT "Configuring and building Skia..."
-    VERBATIM
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/Skia"
-)
+if(WIN32)
+    add_custom_command(
+        TARGET ${SKIA_TARGET}
+        PRE_BUILD
+        COMMAND ${FETCH_GN_COMMAND}
+        COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_use_system_expat=false skia_use_system_harfbuzz=false skia_use_system_icu=false skia_use_system_libjpeg_turbo=false skia_use_system_libpng=false skia_use_system_libwebp=false skia_use_system_zlib=false extra_cflags=[\"${SKIA_CFLAGS}\"]"
+        COMMAND ninja -C "${MD_PDF_SKIA_BUILD_PATH}"
+        COMMENT "Configuring and building Skia..."
+        VERBATIM
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/Skia"
+    )
+
+    install(FILES "${MD_PDF_SKIA_BUILD_PATH}/icudtl.dat" DESTINATION ${CMAKE_INSTALL_BINDIR})
+else()
+    add_custom_command(
+        TARGET ${SKIA_TARGET}
+        PRE_BUILD
+        COMMAND ${FETCH_GN_COMMAND}
+        COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_use_system_expat=true skia_use_system_harfbuzz=true skia_use_system_icu=true skia_use_system_libjpeg_turbo=true skia_use_system_libpng=true skia_use_system_libwebp=true skia_use_system_zlib=true extra_cflags=[\"${SKIA_CFLAGS}\"]"
+        COMMAND ninja -C "${MD_PDF_SKIA_BUILD_PATH}"
+        COMMENT "Configuring and building Skia..."
+        VERBATIM
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/Skia"
+    )
+endif()
