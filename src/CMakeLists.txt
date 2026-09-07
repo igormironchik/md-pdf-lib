@@ -47,22 +47,29 @@ if (UNIX)
 else()
     set(ICU_LIBS icu)
 
-    get_target_property(ZLIB_INCLUDE_DIR ZLIB::ZLIB INTERFACE_INCLUDE_DIRECTORIES)
-    get_target_property(ZLIB_COMPILE_OPTS ZLIB::ZLIB INTERFACE_COMPILE_OPTIONS)
-    get_target_property(ZLIB_LINK_LIBS ZLIB::ZLIB INTERFACE_LINK_LIBRARIES)
-
-    if(NOT ZLIB_COMPILE_OPTS)
-        set(ZLIB_COMPILE_OPTS "")
-    endif()
-
-    set(SKIA_CFLAGS "-I${ZLIB_INCLUDE_DIR}")
-    set(SKIA_LDFLAGS "${ZLIB_LIBRARY}")
-
     if(CMAKE_BUILD_TYPE STREQUAL "Release")
         list(APPEND SKIA_CFLAGS "/MD")
     else()
         list(APPEND SKIA_CFLAGS "/MDd")
     endif()
+
+    set(SKIA_ARGS_GN_FILE "${MD_PDF_SKIA_BUILD_PATH}/args.gn")
+
+    file(GENERATE 
+        OUTPUT "${SKIA_ARGS_GN_FILE}"
+        CONTENT "is_official_build = true
+skia_use_system_expat = false
+skia_use_system_harfbuzz = false
+skia_use_system_icu = false
+skia_use_system_libjpeg_turbo = false
+skia_use_system_libpng = false
+skia_use_system_libwebp = false
+skia_use_system_zlib = true
+skia_enable_tools=false
+extra_cflags = [ \"-I$<JOIN:$<TARGET_PROPERTY:ZLIB::ZLIB,INTERFACE_INCLUDE_DIRECTORIES>,\", \"-I>\", \"${SKIA_CFLAGS}\" ]
+extra_ldflags = [ \"$<TARGET_PROPERTY:ZLIB::ZLIB,INTERFACE_LINK_DIRECTORIES>/zlib.lib\" ]
+"
+    )
 endif()
 
 if (NOT BUILD_TEST_LIBRARY)
@@ -163,8 +170,9 @@ if(WIN32)
         TARGET ${SKIA_TARGET}
         PRE_BUILD
         COMMAND ${FETCH_GN_COMMAND}
-        COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_use_system_expat=false skia_use_system_harfbuzz=false skia_use_system_icu=false skia_use_system_libjpeg_turbo=false skia_use_system_libpng=false skia_use_system_libwebp=false skia_use_system_zlib=true extra_cflags=[\"${SKIA_CFLAGS}\"] extra_ldflags=[\"${SKIA_LDFLAGS}\"]"
-        COMMAND ninja -C "${MD_PDF_SKIA_BUILD_PATH}"
+        COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}"
+        COMMAND ninja -C "${MD_PDF_SKIA_BUILD_PATH}" skia
+        COMMAND ninja -C "${MD_PDF_SKIA_BUILD_PATH}" modules
         COMMENT "Configuring and building Skia..."
         VERBATIM
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/Skia"
@@ -176,8 +184,9 @@ else()
         TARGET ${SKIA_TARGET}
         PRE_BUILD
         COMMAND ${FETCH_GN_COMMAND}
-        COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_use_system_expat=true skia_use_system_harfbuzz=true skia_use_system_icu=true skia_use_system_libjpeg_turbo=true skia_use_system_libpng=true skia_use_system_libwebp=true skia_use_system_zlib=true extra_cflags=[\"${SKIA_CFLAGS}\"] extra_ldflags=[\"${SKIA_LDFLAGS}\"]"
-        COMMAND ninja -C "${MD_PDF_SKIA_BUILD_PATH}"
+        COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_enable_tools=false skia_use_system_expat=true skia_use_system_harfbuzz=true skia_use_system_icu=true skia_use_system_libjpeg_turbo=true skia_use_system_libpng=true skia_use_system_libwebp=true skia_use_system_zlib=true extra_cflags=[\"${SKIA_CFLAGS}\"] extra_ldflags=[\"${SKIA_LDFLAGS}\"]"
+        COMMAND ninja -C "${MD_PDF_SKIA_BUILD_PATH}" skia
+        COMMAND ninja -C "${MD_PDF_SKIA_BUILD_PATH}" modules
         COMMENT "Configuring and building Skia..."
         VERBATIM
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/Skia"
