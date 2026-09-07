@@ -44,6 +44,16 @@ endif()
 
 link_directories(${MD_PDF_SKIA_BUILD_PATH})
 
+if (UNIX)
+    find_package(ICU REQUIRED COMPONENTS uc)
+    find_package(WebP REQUIRED)
+    find_package(harfbuzz REQUIRED)
+    list(APPEND PLATFORM_LIBS WebP::webpdemux WebP::webp harfbuzz::harfbuzz harfbuzz::subset)
+    set (ICU_LIBS ICU::uc)
+else()
+    set(ICU_LIBS icu)
+endif()
+
 if (NOT BUILD_TEST_LIBRARY)
     add_library(md-pdf-lib STATIC ${LIB_SRC})
 
@@ -70,8 +80,7 @@ if (NOT BUILD_TEST_LIBRARY)
         skia
         expat
         harfbuzz
-        icu
-        zlib
+        ${ICU_LIBS}
         ${PLATFORM_LIBS}
         ZLIB::ZLIB)
 
@@ -109,8 +118,7 @@ else()
         skia
         expat
         harfbuzz
-        icu
-        zlib
+        ${ICU_LIBS}
         ${PLATFORM_LIBS}
         ZLIB::ZLIB
         Qt6::Test
@@ -146,7 +154,7 @@ if(WIN32)
         TARGET ${SKIA_TARGET}
         PRE_BUILD
         COMMAND ${FETCH_GN_COMMAND}
-        COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_use_system_expat=false skia_use_system_harfbuzz=false skia_use_system_icu=false skia_use_system_libjpeg_turbo=false skia_use_system_libpng=false skia_use_system_libwebp=false skia_use_system_zlib=false extra_cflags=[\"${SKIA_CFLAGS}\"]"
+        COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_use_system_expat=false skia_use_system_harfbuzz=false skia_use_system_icu=false skia_use_system_libjpeg_turbo=false skia_use_system_libpng=false skia_use_system_libwebp=false skia_use_system_zlib=true extra_cflags=[\"${SKIA_CFLAGS}\"]"
         COMMAND ninja -C "${MD_PDF_SKIA_BUILD_PATH}"
         COMMENT "Configuring and building Skia..."
         VERBATIM
