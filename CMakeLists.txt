@@ -22,7 +22,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}/bin)
 
 if(WIN32)
-    set(PLATFORM_LIBS Dwmapi Dwrite libwebp libpng libjpeg jsonreader)
+    set(PLATFORM_LIBS Dwmapi Dwrite libwebp libpng libjpeg jsonreader harfbuzz)
 endif()
 
 if(UNIX)

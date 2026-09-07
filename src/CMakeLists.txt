@@ -79,7 +79,6 @@ if (NOT BUILD_TEST_LIBRARY)
         skunicode_core
         skia
         expat
-        harfbuzz
         ${ICU_LIBS}
         ${PLATFORM_LIBS}
         ZLIB::ZLIB)
@@ -117,7 +116,6 @@ else()
         skunicode_core
         skia
         expat
-        harfbuzz
         ${ICU_LIBS}
         ${PLATFORM_LIBS}
         ZLIB::ZLIB
