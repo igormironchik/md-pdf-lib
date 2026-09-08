@@ -84,7 +84,6 @@ if (NOT BUILD_TEST_LIBRARY)
         Qt6::Network
         Qt6::Core
         bentleyottmann
-        compression_utils_portable
         skresources
         skcms
         skottie
@@ -121,7 +120,6 @@ else()
         Qt6::Network
         Qt6::Core
         bentleyottmann
-        compression_utils_portable
         skresources
         skcms
         skottie

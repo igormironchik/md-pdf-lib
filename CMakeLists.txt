@@ -26,7 +26,7 @@ if(WIN32)
 endif()
 
 if(UNIX)
-    set(PLATFORM_LIBS freetype fontconfig dng_sdk piex png jpeg)
+    set(PLATFORM_LIBS freetype fontconfig dng_sdk piex png jpeg compression_utils_portable)
 endif()
 
 add_compile_definitions(QT_NO_KEYWORDS)
