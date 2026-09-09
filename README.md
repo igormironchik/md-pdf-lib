@@ -17,3 +17,7 @@ This project forced to be under the GPL license because I use code from Qt 6. I 
 one function from Qt 6, so it's not so big deal to write that function by myself and
 free from GPL ties. If somebody wants something like the MIT license - you are
 welcome to discuss it with me.
+
+# Screenshots
+
+![](./md-pdf-lib.png)

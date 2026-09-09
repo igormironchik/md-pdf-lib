@@ -4,7 +4,7 @@ SPDX-PackageSupplier = "Igor Mironchik <igor.mironchik@gmail.com>"
 SPDX-PackageDownloadLocation = "https://github.com/igormironchik/md-pdf-lib"
 
 [[annotations]]
-path = ["tests/auto/test_render/**.data", "tests/manual/**", "src/resources.qrc", "README.md", ".gitignore", ".gitmodules", ".gitattributes", "conanfile.py", "src/svg/**", "REUSE.toml", "apply-clang-format.sh", "skia_reduce_size.sh"]
+path = ["tests/auto/test_render/**.data", "tests/manual/**", "src/resources.qrc", "README.md", ".gitignore", ".gitmodules", ".gitattributes", "conanfile.py", "src/svg/**", "REUSE.toml", "apply-clang-format.sh", "skia_reduce_size.sh", "md-pdf-lib.png"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Igor Mironchik <igor.mironchik@gmail.com>"
 SPDX-License-Identifier = "GPL-3.0-or-later"
