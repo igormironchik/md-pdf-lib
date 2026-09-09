@@ -5,7 +5,12 @@ cmake_minimum_required(VERSION 3.19)
 
 project(md-pdf-lib)
 
+option(BUILD_MD_TESTS "Build tests? Default OFF." OFF)
 option(BUILD_TEST_LIBRARY "Build test library? Default OFF." OFF)
+
+if(BUILD_MD_TESTS)
+    set(BUILD_TEST_LIBRARY ON)
+endif()
 
 set(KF_MIN_VERSION "6")
 set(KF_MAJOR_VERSION "6")
@@ -80,3 +85,9 @@ endif()
 set(_DISABLE_INSTALLATION FALSE)
 
 add_subdirectory(src)
+
+if(BUILD_MD_TESTS)
+	enable_testing()
+
+	add_subdirectory(tests)
+endif()
