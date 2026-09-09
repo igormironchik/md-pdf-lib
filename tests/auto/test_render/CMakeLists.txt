@@ -31,4 +31,4 @@ target_link_libraries(test.render
 
 add_test(NAME test.render
     COMMAND test.render${CMAKE_EXECUTABLE_SUFFIX}
-	WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/../../../bin)
+    WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
