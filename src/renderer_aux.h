@@ -73,6 +73,7 @@ SkSize a4Size();
 
 class PdfRenderer;
 
+//! Just a wrapper for QByteArray with UTF8 data.
 struct Utf8String {
     QByteArray data;
 
@@ -83,9 +84,13 @@ struct Utf8String {
     operator std::string_view() const;
 }; // struct Utf8String
 
+//! Font type.
 using Font = SkFont;
+//! Painter (page) type.
 using Painter = SkCanvas;
+//! String type.
 using String = Utf8String;
+//! Image type.
 using Image = SkImage;
 
 //! Rectangle with base point at bottom left corner.
@@ -97,11 +102,16 @@ struct RectF {
           qreal width,
           qreal height);
 
+    //! \return Left coordinate.
     qreal x() const;
+    //! \return Bottom coordinate.
     qreal bottomY() const;
+    //! \return Width.
     qreal width() const;
+    //! \return Height.
     qreal height() const;
 
+    //! Set width.
     void setWidth(qreal w);
 
     qreal m_leftX = 0.0;
@@ -112,15 +122,21 @@ struct RectF {
 
 //! Page descriptors.
 struct Page {
+    //! Painter builder.
     std::shared_ptr<SkPictureRecorder> m_recorder;
+    //! Actual painter of the page.
     Painter *m_canvas = nullptr;
 }; // struct Page
 
 //! Image alignment.
 enum class ImageAlignment {
+    //! Unknown.
     Unknown,
+    //! On the left.
     Left,
+    //! By center.
     Center,
+    //! On the right.
     Right
 }; // enum ImageAlignment
 
@@ -528,7 +544,9 @@ struct WhereDrawn {
 struct RTLFlag {
     RTLFlag();
 
+    //! \return Should the check be done?
     bool isCheck() const;
+    //! \return Is direction RTL?
     bool isRightToLeft() const;
 
     bool m_isOn = false;

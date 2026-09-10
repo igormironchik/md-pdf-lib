@@ -49,7 +49,14 @@ public:
 // PdfRenderer
 //
 
-//! Renderer to PDF.
+/*! Renderer to PDF.
+ *
+ * This renderer designed to work on the thread. User just invokes render()
+ * method from any thread, and this object on the his thread do things. Signals from base class
+ * Renderer can be used to control rendering process.
+ *
+ * To terminate renderings terminate() method can be used from any thread.
+ */
 class PdfRenderer : public Renderer
 {
     Q_OBJECT

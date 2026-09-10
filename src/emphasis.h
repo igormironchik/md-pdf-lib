@@ -11,6 +11,7 @@
 namespace MdPdf
 {
 
+//! Base class for additional emphasises.
 class BaseEmphasisParser : public MD::EmphasisParser
 {
 public:
@@ -30,6 +31,7 @@ private:
     const QChar m_symbol;
 }; // class BaseEmphasisParser
 
+//! Subscript emphasis.
 class SubEmphasisParser : public BaseEmphasisParser
 {
 public:
@@ -44,6 +46,7 @@ public:
                                          qsizetype length) const override;
 }; // class SubEmphasisParser
 
+//! Superscript emphasis.
 class SupEmphasisParser : public BaseEmphasisParser
 {
 public:
@@ -58,6 +61,7 @@ public:
                                          qsizetype length) const override;
 }; // class SupEmphasisParser
 
+//! Highlighting emphasis.
 class HighlightEmphasisParser : public BaseEmphasisParser
 {
 public:

@@ -27,7 +27,7 @@ void initSharedResources();
 //! \return Is a given character RTL one?
 bool isRightToLeft(const QChar &ch);
 
-//! Aux struct for splitted words.
+//! Auxiliary struct for splitted words.
 struct Word {
     Word() = default;
     Word(const QString &word,
@@ -41,6 +41,7 @@ struct Word {
     const Font *m_font = nullptr;
 }; // struct Word
 
+//! Makes Utf8String from QString.
 inline Utf8String createUtf8String(const QString &text)
 {
     return {text.toUtf8()};

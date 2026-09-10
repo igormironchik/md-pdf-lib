@@ -16,12 +16,14 @@ namespace MdPdf
 // EmojiItem
 //
 
+//! Emoji item in MD::Document.
 class EmojiItem : public MD::ItemWithOpts
 {
 public:
     EmojiItem() = default;
     ~EmojiItem() override = default;
 
+    //! \return Emoji item type.
     static constexpr MD::ItemType emojiType()
     {
         return static_cast<MD::ItemType>(static_cast<int>(MD::ItemType::UserDefined) + 2);
@@ -30,7 +32,13 @@ public:
     MD::ItemType type() const override;
     QSharedPointer<MD::Item> clone(MD::Document *doc = nullptr) const override;
 
+    //! \return Emoji name (key in s_emojiMap).
     const QString &emojiName() const;
+    /*!
+     * \brief Set Emoji name (key in s_emojiMap).
+     *
+     * \param name Emoji name (key in s_emojiMap).
+     */
     void setEmojiName(const QString &name);
 
 private:
