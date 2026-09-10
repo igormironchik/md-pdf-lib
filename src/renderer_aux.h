@@ -5,6 +5,22 @@
 
 #pragma once
 
+// Qt include.
+#include <QByteArray>
+#include <QColor>
+#include <QImage>
+#include <QMutex>
+#include <QNetworkReply>
+#include <QObject>
+#include <QSharedPointer>
+#include <QStack>
+#include <QTemporaryFile>
+
+#ifdef MD_PDF_TESTING
+#include <QFile>
+#include <QTextStream>
+#endif // MD_PDF_TESTING
+
 // Skia include.
 #include <include/core/SkCanvas.h>
 #include <include/core/SkFont.h>
@@ -24,22 +40,6 @@
 
 // md4qt include.
 #include <md4qt/src/doc.h>
-
-// Qt include.
-#include <QByteArray>
-#include <QColor>
-#include <QImage>
-#include <QMutex>
-#include <QNetworkReply>
-#include <QObject>
-#include <QSharedPointer>
-#include <QStack>
-#include <QTemporaryFile>
-
-#ifdef MD_PDF_TESTING
-#include <QFile>
-#include <QTextStream>
-#endif // MD_PDF_TESTING
 
 // C++ include.
 #include <functional>
