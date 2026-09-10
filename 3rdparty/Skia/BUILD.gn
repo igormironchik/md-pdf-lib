@@ -69,6 +69,9 @@ config("skia_public") {
   if (skia_build_fuzzers) {
     defines += [ "SK_BUILD_FOR_FUZZER" ]
   }
+  if (skia_enable_threadlocal_strikecache) {
+    defines += [ "SK_ENABLE_THREADLOCAL_STRIKECACHE" ]
+  }
 
   # Some older versions of the Clang toolchain change the visibility of
   # symbols decorated with API_AVAILABLE macro to be visible. Users of such
@@ -92,6 +95,9 @@ config("skia_private") {
       "SK_GAMMA_EXPONENT=1.4",
       "SK_GAMMA_CONTRAST=0.0",
     ]
+  }
+  if (skia_use_lcd_text_3x_filter) {
+    defines += [ "SK_USE_LCD_TEXT_3X_FILTER" ]
   }
   if (is_skia_dev_build && !is_canvaskit) {
     defines += [
@@ -896,7 +902,7 @@ optional("gpu_shared") {
   enabled = skia_enable_ganesh || skia_enable_graphite
 
   configs = []
-  deps = []
+  deps = [ ":core" ]
   libs = []
   public_defines = []
   public_deps = []
@@ -1131,7 +1137,10 @@ optional("jpeg_encode") {
   enabled = skia_use_libjpeg_turbo_encode && !skia_use_ndk_images
   public_defines = [ "SK_CODEC_ENCODES_JPEG" ]
 
-  deps = [ "//third_party/libjpeg-turbo:libjpeg" ]
+  deps = [
+    ":core",
+    "//third_party/libjpeg-turbo:libjpeg",
+  ]
   public = skia_encode_jpeg_public
   sources = skia_encode_jpeg_srcs
 
@@ -1169,6 +1178,7 @@ optional("graphite") {
 
   enabled = skia_enable_graphite
   deps = [
+    ":core",
     ":gpu_shared",
     ":vello",
   ]
@@ -1379,8 +1389,9 @@ if (is_debug) {
 # from having multiple copies of the Rust standard library.
 
 if (skia_use_fontations || skia_use_rust_png_decode ||
-    skia_use_rust_png_encode || skia_use_rust_bmp_decode || skia_use_rust_icc ||
-    skia_use_rust_exif) {
+    skia_use_rust_png_encode || skia_use_rust_bmp_decode ||
+    skia_use_rust_ico_decode || skia_use_rust_icc || skia_use_rust_exif ||
+    skia_use_rust_jpeg_decode || skia_use_rust_jpeg_encode) {
   # Collect all Rust targets, sources, outputs based on what's enabled
   _rust_targets = []
   _rust_sources = []
@@ -1388,9 +1399,11 @@ if (skia_use_fontations || skia_use_rust_png_decode ||
   _rust_output_mappings = []
 
   # Add cxx dependency if any feature that needs it is enabled
-  _needs_cxx = skia_use_fontations || skia_use_rust_png_decode ||
-               skia_use_rust_png_encode || skia_use_rust_bmp_decode ||
-               skia_use_rust_icc || skia_use_rust_exif
+  _needs_cxx =
+      skia_use_fontations || skia_use_rust_png_decode ||
+      skia_use_rust_png_encode || skia_use_rust_bmp_decode ||
+      skia_use_rust_ico_decode || skia_use_rust_icc || skia_use_rust_exif ||
+      skia_use_rust_jpeg_decode || skia_use_rust_jpeg_encode
   if (_needs_cxx) {
     _rust_targets += [ "@crates//:cxx_cc" ]
     _rust_sources += [
@@ -1463,23 +1476,44 @@ if (skia_use_fontations || skia_use_rust_png_decode ||
   }
 
   if (skia_use_rust_bmp_decode) {
-    _rust_targets += [ "//experimental/rust_bmp/ffi:ffi_rs" ]
+    _rust_targets += [ "//rust/bmp:ffi_rs" ]
     _rust_sources += [
-      "experimental/rust_bmp/ffi/BUILD.bazel",
-      "experimental/rust_bmp/ffi/FFI.rs",
+      "rust/bmp/BUILD.bazel",
+      "rust/bmp/FFI.rs",
     ]
     _rust_outputs += [
       "$root_out_dir/librust_bmp_ffi_rs.a",
-      "$root_out_dir/experimental/rust_bmp/ffi/FFI.rs.h",
-      "$root_out_dir/experimental/rust_bmp/ffi/FFI.rs.cc",
+      "$root_out_dir/rust/bmp/FFI.rs.h",
+      "$root_out_dir/rust/bmp/FFI.rs.cc",
     ]
     _rust_output_mappings += [
-      rebase_path("//bazel-bin/experimental/rust_bmp/ffi/libffi_rs.a",
-                  root_build_dir) + "=librust_bmp_ffi_rs.a",
-      rebase_path("//bazel-bin/experimental/rust_bmp/ffi/FFI.rs.h",
-                  root_build_dir) + "=experimental/rust_bmp/ffi/FFI.rs.h",
-      rebase_path("//bazel-bin/experimental/rust_bmp/ffi/FFI.rs.cc",
-                  root_build_dir) + "=experimental/rust_bmp/ffi/FFI.rs.cc",
+      rebase_path("//bazel-bin/rust/bmp/libffi_rs.a", root_build_dir) +
+          "=librust_bmp_ffi_rs.a",
+      rebase_path("//bazel-bin/rust/bmp/FFI.rs.h", root_build_dir) +
+          "=rust/bmp/FFI.rs.h",
+      rebase_path("//bazel-bin/rust/bmp/FFI.rs.cc", root_build_dir) +
+          "=rust/bmp/FFI.rs.cc",
+    ]
+  }
+
+  if (skia_use_rust_ico_decode) {
+    _rust_targets += [ "//experimental/rust_ico/ffi:ffi_rs" ]
+    _rust_sources += [
+      "experimental/rust_ico/ffi/BUILD.bazel",
+      "experimental/rust_ico/ffi/FFI.rs",
+    ]
+    _rust_outputs += [
+      "$root_out_dir/librust_ico_ffi_rs.a",
+      "$root_out_dir/experimental/rust_ico/ffi/FFI.rs.h",
+      "$root_out_dir/experimental/rust_ico/ffi/FFI.rs.cc",
+    ]
+    _rust_output_mappings += [
+      rebase_path("//bazel-bin/experimental/rust_ico/ffi/libffi_rs.a",
+                  root_build_dir) + "=librust_ico_ffi_rs.a",
+      rebase_path("//bazel-bin/experimental/rust_ico/ffi/FFI.rs.h",
+                  root_build_dir) + "=experimental/rust_ico/ffi/FFI.rs.h",
+      rebase_path("//bazel-bin/experimental/rust_ico/ffi/FFI.rs.cc",
+                  root_build_dir) + "=experimental/rust_ico/ffi/FFI.rs.cc",
     ]
   }
 
@@ -1489,6 +1523,7 @@ if (skia_use_fontations || skia_use_rust_png_decode ||
       "rust/icc/BUILD.bazel",
       "rust/icc/FFI.h",
       "rust/icc/FFI.rs",
+      "rust/icc/icc_parse.rs",
     ]
     _rust_outputs += [
       "$root_out_dir/librust_icc_ffi_rs.a",
@@ -1527,6 +1562,27 @@ if (skia_use_fontations || skia_use_rust_png_decode ||
     ]
   }
 
+  if (skia_use_rust_jpeg_decode || skia_use_rust_jpeg_encode) {
+    _rust_targets += [ "//experimental/rust_jpeg/ffi:ffi_rs" ]
+    _rust_sources += [
+      "experimental/rust_jpeg/ffi/BUILD.bazel",
+      "experimental/rust_jpeg/ffi/FFI.rs",
+    ]
+    _rust_outputs += [
+      "$root_out_dir/librust_jpeg_ffi_rs.a",
+      "$root_out_dir/experimental/rust_jpeg/ffi/FFI.rs.h",
+      "$root_out_dir/experimental/rust_jpeg/ffi/FFI.rs.cc",
+    ]
+    _rust_output_mappings += [
+      rebase_path("//bazel-bin/experimental/rust_jpeg/ffi/libffi_rs.a",
+                  root_build_dir) + "=librust_jpeg_ffi_rs.a",
+      rebase_path("//bazel-bin/experimental/rust_jpeg/ffi/FFI.rs.h",
+                  root_build_dir) + "=experimental/rust_jpeg/ffi/FFI.rs.h",
+      rebase_path("//bazel-bin/experimental/rust_jpeg/ffi/FFI.rs.cc",
+                  root_build_dir) + "=experimental/rust_jpeg/ffi/FFI.rs.cc",
+    ]
+  }
+
   # Single unified action that builds all Rust FFI library targets
   action("rust_all_ffi_bazel_build") {
     script = "gn/bazel_build.py"
@@ -1553,11 +1609,17 @@ if (skia_use_fontations || skia_use_rust_png_decode ||
     if (skia_use_rust_bmp_decode) {
       _all_rust_libs += [ "$root_out_dir/librust_bmp_ffi_rs.a" ]
     }
+    if (skia_use_rust_ico_decode) {
+      _all_rust_libs += [ "$root_out_dir/librust_ico_ffi_rs.a" ]
+    }
     if (skia_use_rust_icc) {
       _all_rust_libs += [ "$root_out_dir/librust_icc_ffi_rs.a" ]
     }
     if (skia_use_rust_exif) {
       _all_rust_libs += [ "$root_out_dir/librust_exif_ffi_rs.a" ]
+    }
+    if (skia_use_rust_jpeg_decode || skia_use_rust_jpeg_encode) {
+      _all_rust_libs += [ "$root_out_dir/librust_jpeg_ffi_rs.a" ]
     }
 
     public_configs = [ ":rust_ffi_libs_config" ]
@@ -1578,11 +1640,17 @@ if (skia_use_fontations || skia_use_rust_png_decode ||
     if (skia_use_rust_bmp_decode) {
       _all_rust_libs += [ "$root_out_dir/librust_bmp_ffi_rs.a" ]
     }
+    if (skia_use_rust_ico_decode) {
+      _all_rust_libs += [ "$root_out_dir/librust_ico_ffi_rs.a" ]
+    }
     if (skia_use_rust_icc) {
       _all_rust_libs += [ "$root_out_dir/librust_icc_ffi_rs.a" ]
     }
     if (skia_use_rust_exif) {
       _all_rust_libs += [ "$root_out_dir/librust_exif_ffi_rs.a" ]
+    }
+    if (skia_use_rust_jpeg_decode || skia_use_rust_jpeg_encode) {
+      _all_rust_libs += [ "$root_out_dir/librust_jpeg_ffi_rs.a" ]
     }
     libs = _all_rust_libs
 
@@ -1685,7 +1753,8 @@ config("rust_common_cxx_bridge_public_config") {
 }
 
 optional("rust_common") {
-  enabled = skia_use_rust_png_decode || skia_use_rust_png_encode
+  enabled = skia_use_rust_png_decode || skia_use_rust_png_encode ||
+            skia_use_rust_bmp_decode
   public_defines = []
   if (skia_use_rust_png_for_android) {
     public_defines += [ "SK_CODEC_USES_PNG_WITH_RUST_FOR_ANDROID" ]
@@ -1748,6 +1817,9 @@ optional("png_decode_rust") {
   sources = skia_codec_rust_png
   sources_for_tests = [ "tests/SkPngRustDecoderTest.cpp" ]
 
+  # The public header pulls in `rust/png/FFI.rs.h`, so dependents need the cxx
+  # bridge's include path (`$root_out_dir`) on their compile line.
+  public_configs = [ ":rust_common_cxx_bridge_public_config" ]
   deps = [
     ":png_decode_common",
     ":rust_common",
@@ -1773,17 +1845,14 @@ optional("png_encode_rust") {
 }
 
 if (skia_use_rust_bmp_decode) {
-  config("rust_bmp_cxx_bridge_public_config") {
-    include_dirs = [ "$root_out_dir" ]
-  }
   config("rust_bmp_cxx_bridge_private_config") {
     include_dirs = [ "." ]
   }
   skia_source_set("rust_bmp_cxx_bridge") {
     deps = [ ":rust_all_ffi_bazel_build" ]
-    public = [ "${root_out_dir}/experimental/rust_bmp/ffi/FFI.rs.h" ]
-    sources = [ "${root_out_dir}/experimental/rust_bmp/ffi/FFI.rs.cc" ]
-    public_configs = [ ":rust_bmp_cxx_bridge_public_config" ]
+    public = [ "${root_out_dir}/rust/bmp/FFI.rs.h" ]
+    sources = [ "${root_out_dir}/rust/bmp/FFI.rs.cc" ]
+    public_configs = [ ":rust_common_cxx_bridge_public_config" ]
     configs = [ ":rust_bmp_cxx_bridge_private_config" ]
   }
 }
@@ -1791,17 +1860,97 @@ if (skia_use_rust_bmp_decode) {
 optional("bmp_decode_rust") {
   public_defines = [ "SK_CODEC_DECODES_BMP_WITH_RUST" ]
   enabled = skia_use_rust_bmp_decode
-  public = [ "experimental/rust_bmp/decoder/SkBmpRustDecoder.h" ]
-  sources = [
-    "experimental/rust_bmp/decoder/SkBmpRustDecoder.cpp",
-    "experimental/rust_bmp/decoder/SkBmpRustDecoder.h",
-    "experimental/rust_bmp/decoder/impl/SkBmpRustCodec.cpp",
-    "experimental/rust_bmp/decoder/impl/SkBmpRustCodec.h",
-  ]
+  public = skia_codec_rust_bmp_public
+  sources = skia_codec_rust_bmp
   sources_for_tests = [ "tests/SkBmpRustDecoderTest.cpp" ]
   deps = [
     ":rust_bmp_cxx_bridge",
+    ":rust_common",
     ":rust_ffi_libs",
+  ]
+  libs = [ "c++" ]
+}
+
+if (skia_use_rust_ico_decode) {
+  config("rust_ico_cxx_bridge_public_config") {
+    include_dirs = [ "$root_out_dir" ]
+  }
+  config("rust_ico_cxx_bridge_private_config") {
+    include_dirs = [ "." ]
+  }
+  skia_source_set("rust_ico_cxx_bridge") {
+    deps = [ ":rust_all_ffi_bazel_build" ]
+    public = [ "${root_out_dir}/experimental/rust_ico/ffi/FFI.rs.h" ]
+    sources = [ "${root_out_dir}/experimental/rust_ico/ffi/FFI.rs.cc" ]
+    public_configs = [ ":rust_ico_cxx_bridge_public_config" ]
+    configs = [ ":rust_ico_cxx_bridge_private_config" ]
+  }
+}
+
+optional("ico_decode_rust") {
+  public_defines = [ "SK_CODEC_DECODES_ICO_WITH_RUST" ]
+  enabled = skia_use_rust_ico_decode
+  public = [ "experimental/rust_ico/decoder/SkIcoRustDecoder.h" ]
+  sources = [
+    "experimental/rust_ico/decoder/SkIcoRustDecoder.cpp",
+    "experimental/rust_ico/decoder/SkIcoRustDecoder.h",
+    "experimental/rust_ico/decoder/impl/SkIcoRustCodec.cpp",
+    "experimental/rust_ico/decoder/impl/SkIcoRustCodec.h",
+  ]
+  sources_for_tests = [ "tests/SkIcoRustDecoderTest.cpp" ]
+  deps = [
+    ":bmp_decode_rust",
+    ":png_decode_rust",
+    ":rust_ffi_libs",
+    ":rust_ico_cxx_bridge",
+  ]
+  libs = [ "c++" ]
+}
+
+if (skia_use_rust_jpeg_decode || skia_use_rust_jpeg_encode) {
+  config("rust_jpeg_cxx_bridge_public_config") {
+    include_dirs = [ "$root_out_dir" ]
+  }
+  config("rust_jpeg_cxx_bridge_private_config") {
+    include_dirs = [ "." ]
+  }
+  skia_source_set("rust_jpeg_cxx_bridge") {
+    deps = [ ":rust_all_ffi_bazel_build" ]
+    public = [ "${root_out_dir}/experimental/rust_jpeg/ffi/FFI.rs.h" ]
+    sources = [ "${root_out_dir}/experimental/rust_jpeg/ffi/FFI.rs.cc" ]
+    public_configs = [ ":rust_jpeg_cxx_bridge_public_config" ]
+    configs = [ ":rust_jpeg_cxx_bridge_private_config" ]
+  }
+}
+
+optional("jpeg_decode_rust") {
+  public_defines = [ "SK_CODEC_DECODES_JPEG_WITH_RUST" ]
+  enabled = skia_use_rust_jpeg_decode
+  public = skia_codec_rust_jpeg_public
+  sources = skia_codec_rust_jpeg
+  sources_for_tests = [ "tests/SkJpegRustCodecTest.cpp" ]
+  deps = [
+    ":jpeg_encode_rust",
+    ":rust_ffi_libs",
+    ":rust_jpeg_cxx_bridge",
+    "modules/skcms",
+  ]
+  libs = [ "c++" ]
+  if (skia_use_jpeg_gainmaps) {
+    public_defines += [ "SK_CODEC_DECODES_JPEG_GAINMAPS" ]
+    deps += [ ":xml" ]
+    sources += skia_codec_jpeg_xmp
+  }
+}
+
+optional("jpeg_encode_rust") {
+  public_defines = [ "SK_CODEC_ENCODES_JPEG_WITH_RUST" ]
+  enabled = skia_use_rust_jpeg_encode
+  public = skia_encode_rust_jpeg_public
+  sources = skia_encode_rust_jpeg_srcs
+  deps = [
+    ":rust_ffi_libs",
+    ":rust_jpeg_cxx_bridge",
   ]
   libs = [ "c++" ]
 }
@@ -1819,7 +1968,10 @@ optional("webp_encode") {
   public_defines = [ "SK_CODEC_ENCODES_WEBP" ]
   public = skia_encode_webp_public
 
-  deps = [ "//third_party/libwebp" ]
+  deps = [
+    ":core",
+    "//third_party/libwebp",
+  ]
   sources = skia_encode_webp_srcs
 }
 
@@ -1830,7 +1982,10 @@ optional("wuffs") {
     "SK_CODEC_DECODES_GIF",
   ]
 
-  deps = [ "//third_party/wuffs" ]
+  deps = [
+    ":core",
+    "//third_party/wuffs",
+  ]
   sources = [ "src/codec/SkWuffsCodec.cpp" ]
 }
 
@@ -1838,7 +1993,10 @@ optional("xml") {
   enabled = skia_use_expat || skia_use_jpeg_gainmaps
   public_defines = [ "SK_XML" ]
 
-  deps = [ "//third_party/expat" ]
+  deps = [
+    ":core",
+    "//third_party/expat",
+  ]
   sources = skia_xml_sources
   sources += skia_codec_xmp
   sources += skia_svg_writer_sources
@@ -1886,6 +2044,8 @@ skia_source_set("core") {
   configs = skia_library_configs
   public = skia_core_public
   sources = skia_core_sources
+
+  public_deps = [ "//src/partition_alloc:raw_ptr" ]
 
   # These deps don't belong to :core, but they are currently needed to support (de)serialization.
   deps = [
@@ -2780,6 +2940,11 @@ if (skia_enable_tools) {
       sources = tests_sources + pathops_tests_sources
       frameworks = []
       if (skia_use_metal) {
+        cflags_cc = [
+          "-x",
+          "objective-c++",
+          "-fobjc-arc",
+        ]
         cflags_objcc = [ "-fobjc-arc" ]
         frameworks += [ "MetalKit.framework" ]
       }
@@ -2825,6 +2990,8 @@ if (skia_enable_tools) {
         ":fontmgr_fontconfig_tests",
         ":fontmgr_mac_ct_tests",
         ":fontscanner_tests",
+        ":ico_decode_rust_tests",
+        ":jpeg_decode_rust_tests",
         ":png_decode_libpng_tests",
         ":png_decode_rust_tests",
         ":png_encode_rust_tests",
@@ -2847,6 +3014,12 @@ if (skia_enable_tools) {
         "//third_party/libwebp",
         "//third_party/zlib",
       ]
+      if (skia_use_rust_jpeg_decode) {
+        deps += [ ":jpeg_decode_rust" ]
+      }
+      if (skia_use_rust_jpeg_encode) {
+        deps += [ ":jpeg_encode_rust" ]
+      }
     }
   }
 
@@ -3194,6 +3367,7 @@ if (skia_enable_tools) {
         "modules/jsonreader",
         "modules/skottie:fuzz",
         "modules/skparagraph",
+        "modules/skshaper",
         "modules/svg",
       ]
       if (skia_use_rust_bmp_decode) {
@@ -3777,7 +3951,10 @@ if (skia_build_fuzzers) {
       "fuzz/FuzzSkParagraph.cpp",
       "fuzz/oss_fuzz/FuzzSkParagraph.cpp",
     ]
-    deps = [ "modules/skparagraph" ]
+    deps = [
+      "modules/skparagraph",
+      "modules/skshaper",
+    ]
   }
 
   libfuzzer_app("api_svg_canvas") {
@@ -3903,7 +4080,10 @@ if (skia_build_fuzzers) {
 
   libfuzzer_app("svg_dom") {
     sources = [ "fuzz/oss_fuzz/FuzzSVG.cpp" ]
-    deps = [ "modules/svg" ]
+    deps = [
+      "modules/skshaper",
+      "modules/svg",
+    ]
   }
 
   libfuzzer_app("skruntimeblender") {

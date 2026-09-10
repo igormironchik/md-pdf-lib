@@ -13,6 +13,7 @@
 #include "src/core/SkBlenderBase.h"
 #include "src/core/SkColorSpacePriv.h"
 #include "src/core/SkImageInfoPriv.h"
+#include "src/core/SkMeshPriv.h"
 #include "src/effects/colorfilters/SkColorFilterBase.h"
 #include "src/gpu/Blend.h"
 #include "src/gpu/DitherUtils.h"
@@ -169,6 +170,7 @@ PaintParams::PaintParams(const SkPaint& paint,
                       skipColorXform,
                       ignoreShader) {}
 
+
 PaintParams::PaintParams(const SkPaint& paint, const SimpleImage& imageOverride, float xtraAlpha)
         : PaintParams(paint,
                       &imageOverride,
@@ -202,6 +204,14 @@ PaintParams::PaintParams(const SkColor4f& color, SkBlendMode finalBlendMode)
         , fSkipColorXform(false)
         , fDither(false) {}
 
+PaintParams PaintParams::makeWithPrimitiveColor(const SkBlender* primitiveBlender,
+                                                const SkColor4f& primitiveColorOverride) const {
+    PaintParams copy = *this;
+    copy.fPrimitiveBlender = primitiveBlender;
+    copy.fPrimitiveColorOverride = primitiveColorOverride;
+    return copy;
+}
+
 SkColor4f PaintParams::Color4fPrepForDst(SkColor4f srcColor, const SkColorInfo& dstColorInfo) {
     // xform from sRGB to the destination colorspace
     SkColorSpaceXformSteps steps(sk_srgb_singleton(),       kUnpremul_SkAlphaType,
@@ -210,6 +220,15 @@ SkColor4f PaintParams::Color4fPrepForDst(SkColor4f srcColor, const SkColorInfo& 
     SkColor4f result = srcColor;
     steps.apply(result.vec());
     return result;
+}
+
+PaintParams PaintParams::makeWithMesh(const SkMesh& mesh) const {
+    PaintParams copy = *this;
+    copy.fMeshSpec = mesh.spec();
+    copy.fMeshChildren = mesh.children();
+    copy.fPrimitiveColorSpace = SkMeshSpecificationPriv::ColorSpace(*mesh.spec());
+    copy.fPrimitiveAlphaType = SkMeshSpecificationPriv::AlphaType(*mesh.spec());
+    return copy;
 }
 
 #if defined(SK_DEBUG)
@@ -293,8 +312,19 @@ bool ShadingParams::handlePrimitiveColor(const KeyContext& keyContext) const {
     const bool canSkipBlendStep = fPaint.skipPrimitiveColorXform() &&
                                   primBlend == SkBlendMode::kDst;
 
+    std::optional<SkPMColor4f> primColorOverride;
+    if (fPaint.primitiveColorOverride()) {
+        primColorOverride = PaintParams::Color4fPrepForDst(*fPaint.primitiveColorOverride(),
+                                                           keyContext.dstColorInfo()).premul();
+    }
+
     if (canSkipBlendStep) {
-        AddPrimitiveColor(keyContext, fPaint.skipPrimitiveColorXform());
+        if (primColorOverride) {
+            SolidColorShaderBlock::AddBlock(keyContext, *primColorOverride);
+        } else {
+            AddPrimitiveColor(keyContext, fPaint.skipPrimitiveColorXform(),
+                              fPaint.primitiveColorSpace(), fPaint.primitiveAlphaType());
+        }
         return false;
     }
 
@@ -307,7 +337,12 @@ bool ShadingParams::handlePrimitiveColor(const KeyContext& keyContext) const {
             srcIsOpaque = this->addPaintColorToKey(keyContext);
         },
         /* addDstToKey= */ [&] () -> void {
-            AddPrimitiveColor(keyContext, fPaint.skipPrimitiveColorXform());
+            if (primColorOverride) {
+                SolidColorShaderBlock::AddBlock(keyContext, *primColorOverride);
+            } else {
+                AddPrimitiveColor(keyContext, fPaint.skipPrimitiveColorXform(),
+                                  fPaint.primitiveColorSpace(), fPaint.primitiveAlphaType());
+            }
         });
     if (primBlend.has_value() && srcIsOpaque) {
         // If the input paint/shader is opaque, the result is only opaque if the primitive blend
@@ -387,6 +422,7 @@ bool ShadingParams::handleDithering(const KeyContext& keyContext) const {
 }
 
 void ShadingParams::handleClipping(const KeyContext& keyContext) const {
+    SkASSERT(!fNonMSAAClip.isEmpty() || fClipShader);
     if (!fNonMSAAClip.isEmpty()) {
 #if defined(SK_GRAPHITE_USE_LEGACY_RRECT_CLIP_SHADER)
         const AnalyticClip& analyticClip = fNonMSAAClip.fAnalyticClip;
@@ -457,8 +493,9 @@ void ShadingParams::handleClipping(const KeyContext& keyContext) const {
             AddAnalyticClip(keyContext, fNonMSAAClip);
         }
 #endif // SK_GRAPHITE_USE_LEGACY_RRECT_CLIP_SHADER
-    } else if (fClipShader) {
+    } else {
         // Since there's no analytic clip, the clipping root node can be fClipShader directly.
+        SkASSERT(fClipShader);
         AddToKey(keyContext, fClipShader);
     }
 }
@@ -471,9 +508,11 @@ std::optional<ShadingParams::Result> ShadingParams::toKey(const KeyContext& keyC
     SkDEBUGCODE(bool paintDependsOnDst = true;)
 
     // Root Node 0 is the source color, which is the output of all effects post dithering
+    keyContext.paintParamsKeyBuilder()->addRootBlockHeader(RootBlockType::kSrcColor);
     bool isOpaque = this->handleDithering(keyContext);
 
     // Root Node 1 is the final blender
+    keyContext.paintParamsKeyBuilder()->addRootBlockHeader(RootBlockType::kFinalBlend);
     SkEnumBitMask<DstUsage> dstUsage = fDstUsage;
     if (fPaint.finalBlender()) {
         AddToKey(keyContext, fPaint.finalBlender());
@@ -533,7 +572,16 @@ std::optional<ShadingParams::Result> ShadingParams::toKey(const KeyContext& keyC
     }
 
     // Optional Root Node 2 is the clip
-    this->handleClipping(keyContext);
+    if (fClipShader || !fNonMSAAClip.isEmpty()) {
+        keyContext.paintParamsKeyBuilder()->addRootBlockHeader(RootBlockType::kClip);
+        this->handleClipping(keyContext);
+    }
+
+    // Optional Root Node 3 is a mesh shader
+    if (fPaint.meshSpec()) {
+        keyContext.paintParamsKeyBuilder()->addRootBlockHeader(RootBlockType::kMeshShader);
+        MeshShaderBlock::AddBlock(keyContext, fPaint.meshSpec(), fPaint.meshChildren());
+    }
 
     // If dstUsage is not kNone, then kDependsOnDst must be set (all other bits only apply *because*
     // the shading depends on dst).
@@ -615,17 +663,17 @@ UniquePaintParamsID ShadingParams::validateOpacityOptimization(const KeyContext&
                                 keyContext.targetFormat()};
 
     // Create a new KeyContext that writes to a different key builder and pipeline data gatherer.
-    // We have to use the original FloatStorageManager since its global state impacts the other
-    // extracted uniforms, but everything will be a cache hit in the second call to toKey(), so it
-    // shouldn't change size.
-    const int fsmSize = keyContext.floatStorageManager()->size();
+    // Since the opaqueKeyContext will inherit the drawContext (and therefore storageContext) from
+    // the existing keyContext, verify that the cache hit by checking the size of the storageContext
+    // cache before and after creation.
+    SkASSERT(keyContext.drawContext()->storageContext());
+    SkDEBUGCODE(const int scSize = keyContext.drawContext()->storageContext()->size());
 
     const Layout layout = keyContext.pipelineDataGatherer()->uniformManager()->layout();
     PaintParamsKeyBuilder opaqueBuilder{keyContext.dict()};
     PipelineDataGatherer opaqueGatherer{layout};
     KeyContext opaqueContext{keyContext.recorder(),
                              keyContext.drawContext(),
-                             keyContext.floatStorageManager(),
                              &opaqueBuilder,
                              &opaqueGatherer,
                              keyContext.local2Dev(),
@@ -640,7 +688,7 @@ UniquePaintParamsID ShadingParams::validateOpacityOptimization(const KeyContext&
     auto [actualOpaqueID, actualDstUsage] = *result;
     SkASSERT(actualDstUsage == DstUsage::kNone);
     opaqueGatherer.checkEquivalent(keyContext.pipelineDataGatherer());
-    SkASSERT(keyContext.floatStorageManager()->size() == fsmSize);
+    SkASSERT(keyContext.drawContext()->storageContext()->size() == scSize);
 
     return actualOpaqueID;
 }

@@ -87,6 +87,7 @@ CoverageMaskRenderStep::CoverageMaskRenderStep(Layout layout)
                       {"mat0", VertexAttribType::kFloat3, SkSLType::kFloat3},
                       {"mat1", VertexAttribType::kFloat3, SkSLType::kFloat3},
                       {"mat2", VertexAttribType::kFloat3, SkSLType::kFloat3}}},
+                     /*storageUniforms=*/{},
                      /*varyings=*/
                      {{// `maskBounds` are the atlas-relative, sorted bounds of the coverage mask.
                       // `textureCoords` are the atlas-relative UV coordinates of the draw, which
@@ -98,7 +99,7 @@ CoverageMaskRenderStep::CoverageMaskRenderStep(Layout layout)
                       // 'invert' is set to 0 use unmodified coverage, and set to 1 for "1-c".
                       {"invert", SkSLType::kHalf}}}) {}
 
-std::string CoverageMaskRenderStep::vertexSkSL() const {
+std::string CoverageMaskRenderStep::vertexSkSL(const RootNodesInfo&) const {
     // Returns the body of a vertex function, which must define a float4 devPosition variable and
     // must write to an already-defined float2 stepLocalCoords variable.
     return "float4 devPosition = coverage_mask_vertex_fn("
@@ -122,6 +123,7 @@ const char* CoverageMaskRenderStep::fragmentCoverageSkSL() const {
 bool CoverageMaskRenderStep::usesUniformsInFragmentSkSL() const { return false; }
 
 void CoverageMaskRenderStep::writeVertices(DrawWriter* dw,
+                                           StorageContext* /*storageContext*/,
                                            const DrawParams& params,
                                            uint32_t ssboIndex) const {
     const CoverageMaskShape& coverageMask = params.geometry().coverageMaskShape();

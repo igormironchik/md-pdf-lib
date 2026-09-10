@@ -74,3 +74,4 @@ rm -rf 3rdparty/Skia/third_party/externals/vulkan-tools
 rm -rf 3rdparty/Skia/third_party/externals/vulkan-utility-libraries
 rm -rf 3rdparty/Skia/third_party/externals/webgpu-headers
 rm -rf 3rdparty/Skia/tools
+rm -rf 3rdparty/Skia/tests

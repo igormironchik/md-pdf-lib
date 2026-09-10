@@ -9,6 +9,7 @@
 #define skgpu_graphite_PaintParams_DEFINED
 
 #include "include/core/SkColor.h"
+#include "include/core/SkMesh.h"
 #include "include/core/SkPaint.h"
 #include "include/private/SkEnumBitMask.h"
 #include "src/gpu/graphite/Caps.h"
@@ -16,6 +17,7 @@
 #include "src/gpu/graphite/geom/NonMSAAClip.h"
 
 class SkColorInfo;
+class SkColorSpace;
 class SkImage;
 class SkShader;
 
@@ -23,7 +25,6 @@ namespace skgpu::graphite {
 
 class DrawContext;
 class KeyContext;
-class FloatStorageManager;
 class PaintParamsKeyBuilder;
 class PipelineDataGatherer;
 class Recorder;
@@ -78,18 +79,32 @@ public:
     // Creates a constant color PaintParams with the specific blend mode.
     PaintParams(const SkColor4f& color, SkBlendMode finalBlendMode);
 
+    // Creates a copy of this PaintParams with the specified primitive color and blender.
+    PaintParams makeWithPrimitiveColor(const SkBlender* primitiveBlender,
+                                       const SkColor4f& primitiveColorOverride) const;
+
     const SkColor4f& color() const { return fColor; }
     const SkShader* shader() const { return fShader; }
     const SimpleImage* imageShader() const { return fImageShader; }
     const SkColorFilter* colorFilter() const { return fColorFilter; }
     const SkBlender* primitiveBlender() const { return fPrimitiveBlender; }
+    const std::optional<SkColor4f>& primitiveColorOverride() const {
+        return fPrimitiveColorOverride;
+    }
     bool skipPrimitiveColorXform() const { return fSkipColorXform; }
+    SkColorSpace* primitiveColorSpace() const { return fPrimitiveColorSpace; }
+    SkAlphaType primitiveAlphaType() const { return fPrimitiveAlphaType; }
+
+    const SkMeshSpecification* meshSpec() const { return fMeshSpec; }
+    SkSpan<const SkRuntimeEffect::ChildPtr> meshChildren() const { return fMeshChildren; }
 
     const SkBlender* finalBlender() const { return fFinalBlend.first; }
     // Must also check finalBlender() to see if that overrides finalBlendMode() behavior.
     SkBlendMode finalBlendMode() const { SkASSERT(!fFinalBlend.first); return fFinalBlend.second; }
 
     bool dither() const { return fDither; }
+
+    PaintParams makeWithMesh(const SkMesh& mesh) const;
 
     /** Converts an SkColor4f to the destination color space. */
     static SkColor4f Color4fPrepForDst(SkColor4f srgb, const SkColorInfo& dstColorInfo);
@@ -121,8 +136,18 @@ private:
     // In the case where there is primitive blending, the primitive color is the source color and
     // the dest is the paint's color (or the paint's shader's computed color).
     const SkBlender* fPrimitiveBlender;
-    bool             fSkipColorXform;
-    bool             fDither;
+    // When a fPrimitiveColorOverride is present, it is used instead of any defined primitive colors
+    // in the vertices for primitive color blending. This is done to enable primitive color blending
+    // for render steps which don't emit primitive colors.
+    std::optional<SkColor4f> fPrimitiveColorOverride;
+    SkColorSpace*            fPrimitiveColorSpace = nullptr;
+    SkAlphaType              fPrimitiveAlphaType = kPremul_SkAlphaType;
+
+    const SkMeshSpecification* fMeshSpec = nullptr;
+    SkSpan<const SkRuntimeEffect::ChildPtr> fMeshChildren;
+
+    bool fSkipColorXform;
+    bool fDither;
 };
 
 // ShadingParams wraps a PaintParams with the additional per-pixel state to handle clipping and

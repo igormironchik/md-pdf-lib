@@ -10,8 +10,8 @@
 #include "include/private/SkTDArray.h"
 #include "src/core/SkVx.h"
 #include "src/gpu/graphite/sparse_strips/Polyline.h"
+#include "src/gpu/graphite/sparse_strips/SparseStripsConfig.h"
 #include "src/gpu/graphite/sparse_strips/SparseStripsTypes.h"
-#include "src/gpu/graphite/sparse_strips/Strip.h"
 #include "src/gpu/graphite/sparse_strips/Tiler.h"
 
 #include <algorithm>
@@ -34,27 +34,21 @@ public:
     // count, we do not anticipate running above MSAAx8 on the CPU, due to a lack of throughput.
     // (Many devices do not 256-wide SIMD, doubling the subsample count doubles memory requirements,
     // etc.)
-    static_assert(Strip::kNumSubSamples == 8);
+    static_assert(SparseStripConfig::kNumSubSamples == 8);
     using SwarPixel = skvx::Vec<2, uint32_t>;
     using PixelBytes = skvx::Vec<8, uint8_t>;
 
-    StripProcessorSimd(SkTDArray<Strip>* stripBuf,
-                       SkTDArray<uint8_t>* alphaBuf,
-                       bool isInverse,
+    StripProcessorSimd(bool isInverse,
                        const Polyline& polyline,
-                       const SkTDArray<uint8_t>& maskLut,
-                       int32_t initialAlphaIdx
+                       const SkTDArray<uint8_t>& maskLut
 #if defined(GPU_TEST_UTILS)
-                       , MsaaExactMaskObserver observer
+                       , MsaaExactMaskObserver observer = nullptr
 #endif
                        )
             : fCoarseWinding(0)
-            , fStripBuf(stripBuf)
-            , fAlphaBuf(alphaBuf)
             , fIsInverse(isInverse)
             , fPolyline(polyline)
             , fMaskLut(maskLut)
-            , fLocalAlphaIdx(initialAlphaIdx)
 #if defined(GPU_TEST_UTILS)
             , fObserver(observer)
 #endif
@@ -62,25 +56,8 @@ public:
         this->clearWinding(kInitialWinding);
     }
 
-    SK_ALWAYS_INLINE void clearWinding(uint32_t val) {
-        SwarPixel* flatSubsampleWinding = &fSubsampleWinding[0][0];
-
-        if constexpr (kTileWidth % 8 == 0) {
-            skvx::Vec<16, uint32_t> vec(val);
-            for (int i = 0; i < kTilePixelCount; i += 8) {
-                vec.store(flatSubsampleWinding + i);
-            }
-        } else if constexpr (kTileWidth % 4 == 0) {
-            skvx::Vec<8, uint32_t> vec(val);
-            for (int i = 0; i < kTilePixelCount; i += 4) {
-                vec.store(flatSubsampleWinding + i);
-            }
-        } else {
-            SwarPixel p = {val, val};
-            for (int i = 0; i < kTilePixelCount; ++i) {
-                flatSubsampleWinding[i] = p;
-            }
-        }
+    SK_ALWAYS_INLINE void clearWinding(uint8_t val) {
+        std::memset(fSubsampleWinding, val, sizeof(fSubsampleWinding));
     }
 
     SK_ALWAYS_INLINE void clearWithCoarseWinding() {
@@ -92,7 +69,7 @@ public:
         } else {
             windingByte = (fCoarseWinding & 1) ? 1 : 0;
         }
-        this->clearWinding(windingByte * 0x01010101u);
+        this->clearWinding(windingByte);
     }
 
     SK_ALWAYS_INLINE void clearWindingForNewRow() { this->clearWinding(kInitialWinding); }
@@ -107,13 +84,11 @@ public:
 
     SK_ALWAYS_INLINE int32_t coarseWinding() const { return fCoarseWinding; }
     SK_ALWAYS_INLINE void setCoarseWinding(int32_t val) { fCoarseWinding = val; }
-    SK_ALWAYS_INLINE int32_t localAlphaIdx() const { return fLocalAlphaIdx; }
 
     // Convert the winding to alpha in row sized chunks. Technically, processChunk could be renamed
     // to processRow, but it is intended to be flexible, so that if the tile width were to exceed
     // the simd width, the row could be proccessed in serial chunks.
-    SK_ALWAYS_INLINE void resolveWindingToAlpha() {
-        uint8_t* tileAlphaBase = reserveAlphaBuffer();
+    SK_ALWAYS_INLINE void resolveWindingToAlpha(uint8_t* tileAlphaBase) {
         for (int32_t row = 0; row < kTileHeight; ++row) {
             if constexpr (kTileWidth % 8 == 0) {
                 for (int32_t column = 0; column < kTileWidth; column += 8) {
@@ -127,17 +102,27 @@ public:
                 }
             }
         }
-        fLocalAlphaIdx += kTilePixelCount;
     }
 
     SK_ALWAYS_INLINE void rasterizeLineToTile(const Tile& tile, std::array<SkPoint, 2> tileBounds) {
         Line line = fPolyline.getLine(tile.lineIdx());
-        bool canonicalXDir = line.p1.fX >= line.p0.fX;
         bool canonicalYDir = line.p1.fY >= line.p0.fY;
+        if (canonicalYDir) {
+            this->rasterizeLineToTileImpl</*kCanonicalYDir=*/true>(tile, tileBounds, line);
+        } else {
+            this->rasterizeLineToTileImpl</*kCanonicalYDir=*/false>(tile, tileBounds, line);
+        }
+    }
+
+    template <bool kCanonicalYDir>
+    SK_ALWAYS_INLINE void rasterizeLineToTileImpl(const Tile& tile,
+                                                  std::array<SkPoint, 2> tileBounds,
+                                                  const Line& line) {
+        bool canonicalXDir = line.p1.fX >= line.p0.fX;
 
         uint32_t windingBit = tile.coarseWinding() ? 1 : 0;
         if constexpr (kIsWinding) {
-            fCoarseWinding += (canonicalYDir ? 1 : -1) * static_cast<int32_t>(windingBit);
+            fCoarseWinding += (kCanonicalYDir ? 1 : -1) * static_cast<int32_t>(windingBit);
         } else {
             fCoarseWinding ^= static_cast<int32_t>(windingBit);
         }
@@ -151,8 +136,8 @@ public:
 
         float dx = line.p1.fX - line.p0.fX;
         float dy = line.p1.fY - line.p0.fY;
-        float invDx = (std::abs(dx) <= Strip::kStripEpsilon) ? 0.0f : 1.0f / dx;
-        float invDy = (std::abs(dy) <= Strip::kStripEpsilon) ? 0.0f : 1.0f / dy;
+        float invDx = (std::abs(dx) <= SparseStripConfig::kStripEpsilon) ? 0.0f : 1.0f / dx;
+        float invDy = (std::abs(dy) <= SparseStripConfig::kStripEpsilon) ? 0.0f : 1.0f / dy;
         float dxdy = dx * invDy;
         std::array<float, 4> derivs = {dx, dy, invDx, invDy};
 
@@ -162,7 +147,7 @@ public:
                                                           derivs,
                                                           tile.intersectionMask(),
                                                           canonicalXDir,
-                                                          canonicalYDir);
+                                                          kCanonicalYDir);
         SkPoint pTop = clippedLine.p0;
         SkPoint pBot = clippedLine.p1;
 
@@ -171,7 +156,7 @@ public:
             this->fillLeft(yEdge, canonicalXDir);
         }
 
-        if (std::abs(dy) < Strip::kStripEpsilon && pTop.fY == std::floor(pTop.fY)) {
+        if (std::abs(dy) < SparseStripConfig::kStripEpsilon && pTop.fY == std::floor(pTop.fY)) {
             return;
         }
 
@@ -208,17 +193,17 @@ public:
 
                 uint8_t leftMask = stepParams.fSortedXDir ? startMaskVal : endMaskVal;
                 uint8_t rightMask = stepParams.fSortedXDir ? endMaskVal : startMaskVal;
-
-                this->processRowSpan(startY, leftMask, rightMask, leftInvert, defaultInvert,
-                                     rightInvert, crossedTop, rowInt, stepParams, canonicalYDir);
+                this->processRowSpan<kCanonicalYDir>(startY, leftMask, rightMask, leftInvert,
+                                                     defaultInvert, rightInvert, crossedTop, rowInt,
+                                                     stepParams);
             }
 
             // Middle rows
             for (int32_t row = startY + 1; row < endY - 1; ++row) {
-                this->processRowSpan(row, /*leftMask=*/0xff, /*rightMask=*/0xff,
-                                     /*leftInvert=*/false, /*midInvert=*/false,
-                                     /*rightInvert=*/false, /*crossedTop=*/true, rowInt, stepParams,
-                                     canonicalYDir);
+                this->processRowSpan<kCanonicalYDir>(row, /*leftMask=*/0xff, /*rightMask=*/0xff,
+                                                     /*leftInvert=*/false, /*midInvert=*/false,
+                                                     /*rightInvert=*/false, /*crossedTop=*/true,
+                                                     rowInt, stepParams);
             }
 
             // Bottom row, if it exists
@@ -232,17 +217,17 @@ public:
 
                 uint8_t leftMask = stepParams.fSortedXDir ? 0xff : endMaskLast;
                 uint8_t rightMask = stepParams.fSortedXDir ? endMaskLast : 0xff;
-
-                this->processRowSpan(lastY, leftMask, rightMask, /*leftInvert=*/false,
-                                     /*midInvert=*/false, /*rightInvert=*/false,
-                                     /*crossedTop=*/true, rowInt, stepParams, canonicalYDir);
+                this->processRowSpan<kCanonicalYDir>(lastY, leftMask, rightMask,
+                                                     /*leftInvert=*/false, /*midInvert=*/false,
+                                                     /*rightInvert=*/false, /*crossedTop=*/true,
+                                                     rowInt, stepParams);
             }
         }
     }
 
 private:
     static constexpr int32_t kTilePixelCount = kTileWidth * kTileHeight;
-    static constexpr uint32_t kInitialWinding = kIsWinding ? 0x80808080u : 0u;
+    static constexpr uint8_t kInitialWinding = kIsWinding ? 0x80 : 0;
 
     struct LineStepParams {
         const uint8_t* fMaskRowLut;
@@ -283,19 +268,12 @@ private:
         }
     }
 
-    SK_ALWAYS_INLINE uint8_t* reserveAlphaBuffer() {
-        if (fAlphaBuf->size() + kTilePixelCount > fAlphaBuf->capacity()) {
-            constexpr size_t kChunkSize = 4 * kTilePixelCount;
-            fAlphaBuf->reserve(fAlphaBuf->capacity() + kChunkSize);
-        }
-        return fAlphaBuf->append(kTilePixelCount);
-    }
-
 #if defined(GPU_TEST_UTILS)
     SK_ALWAYS_INLINE void observeChunk(int32_t row, int32_t column, int32_t chunkSize) {
         for (int32_t x = column; x < column + chunkSize; ++x) {
             SwarPixel v = fSubsampleWinding[row][x];
             uint8_t exactMask = 0;
+            skvx::int8 winding(0);
             uint32_t lo = v[0];
             uint32_t hi = v[1];
             for (int s = 0; s < 4; ++s) {
@@ -305,15 +283,17 @@ private:
                     sLo = static_cast<int8_t>(static_cast<uint8_t>(sLo) - 0x80);
                     sHi = static_cast<int8_t>(static_cast<uint8_t>(sHi) - 0x80);
                 }
+                winding[s] = sLo;
+                winding[s + 4] = sHi;
                 if (ShouldFill(sLo)) exactMask |= (1 << s);
                 if (ShouldFill(sHi)) exactMask |= (1 << (s + 4));
                 lo >>= 8;
                 hi >>= 8;
             }
             if (fIsInverse) {
-                exactMask = ~exactMask & ((1 << Strip::kNumSubSamples) - 1);
+                exactMask = ~exactMask & ((1 << SparseStripConfig::kNumSubSamples) - 1);
             }
-            fObserver(exactMask);
+            fObserver(exactMask, winding);
         }
     }
 #endif
@@ -378,14 +358,8 @@ private:
         skvx::float4 vDxDy(dxdy);
         skvx::float4 vBase(0.0f, 1.0f, 2.0f, 3.0f);
 
-        int32_t height;
-        if constexpr (kTileHeight > 4) {
-            height = (endY + 3) / 4 * 4;
-        } else {
-            height = 4;
-        }
-
-        for (int32_t k = 0; k < height; k += 4) {
+        static_assert((kTileHeight & 3) == 0);
+        for (int32_t k = 0; k < kTileHeight; k += 4) {
             skvx::float4 vGridY = skvx::float4(static_cast<float>(k)) + vBase;
             skvx::float4 vGridX = vPTopX + (vGridY - vPTopY) * vDxDy;
             vGridX.store(rowInt.data() + k);
@@ -415,19 +389,20 @@ private:
             normalY = -normalY;
         }
         float D = normalX + std::abs(normalY);
-        float invD = (D < Strip::kStripEpsilon) ? 0.0f : 1.0f / D;
+        float invD = (D < SparseStripConfig::kStripEpsilon) ? 0.0f : 1.0f / D;
 
         bool hasPositiveSlope = normalY <= 0.0f;
         float C = normalX * pTop.fX + normalY * pTop.fY;
         float s = std::abs(normalY) * invD;
         int lutRowOffset = std::clamp(
-                static_cast<int>(std::floor(s * (Strip::kLutMaskHeight / 2))),
+                static_cast<int>(std::floor(s * (SparseStripConfig::kLutMaskHeight / 2))),
                 0,
-                (Strip::kLutMaskHeight / 2) - 1);
-        int lutRow = hasPositiveSlope ? (lutRowOffset + Strip::kLutMaskHeight / 2) : lutRowOffset;
+                (SparseStripConfig::kLutMaskHeight / 2) - 1);
+        int lutRow = hasPositiveSlope ? (lutRowOffset + SparseStripConfig::kLutMaskHeight / 2) :
+                     lutRowOffset;
 
         // Unlike the scalar version, we simply return the raw pointer to the row in the LUT
-        const uint8_t* maskRowLut = fMaskLut.data() + (lutRow * Strip::kLutMaskWidth);
+        const uint8_t* maskRowLut = fMaskLut.data() + (lutRow * SparseStripConfig::kLutMaskWidth);
 
         float stepX = normalX * invD;
         float stepY = normalY * invD;
@@ -487,15 +462,14 @@ private:
         }
     }
 
-    template <bool kIsEdgePixel>
+    template <bool kCanonicalYDir, bool kIsEdgePixel>
     SK_ALWAYS_INLINE void processPixel(SwarPixel* pixel,
                                        uint8_t truncationMask,
                                        const PixelBytes& pInvert,
                                        int32_t tFixed,
-                                       const uint8_t* maskRowLut,
-                                       bool canonicalYDir) {
+                                       const uint8_t* maskRowLut) {
         // Shift right by 16 to extract the integer LUT column index `u = floor(t * 64)`.
-        int column = std::clamp(tFixed >> 16, 0, Strip::kLutMaskWidthExcl);
+        int column = std::clamp(tFixed >> 16, 0, SparseStripConfig::kLutMaskWidthExcl);
         uint8_t maskVal = maskRowLut[column];
 
         // Apply the truncation mask if we're one of the candidate pixels.
@@ -525,18 +499,18 @@ private:
      * WARNING: relies on pcmpeqb behavior for 3! If this is not true, this will fail.
      */
         const PixelBytes vBit{1, 2, 4, 8, 16, 32, 64, 128};
-        PixelBytes pRes = -((PixelBytes(maskVal) & vBit) != 0);
+        PixelBytes cmp = (PixelBytes(maskVal) & vBit) != 0;
         PixelBytes pSubsampleWinding = sk_bit_cast<PixelBytes>(*pixel);
 
         if constexpr (kIsWinding) {
-            pRes -= pInvert;
-            if (canonicalYDir) {
-                pSubsampleWinding += pRes;
-            } else {
+            PixelBytes pRes = cmp - pInvert;
+            if constexpr (kCanonicalYDir) {
                 pSubsampleWinding -= pRes;
+            } else {
+                pSubsampleWinding += pRes;
             }
         } else {
-            pRes ^= pInvert;
+            PixelBytes pRes = (cmp & 1) ^ pInvert;
             pSubsampleWinding ^= pRes;
         }
 
@@ -545,13 +519,13 @@ private:
 
     // The inversion masks could maybe be moved into templating, but for now simply expose them
     // as function arguments and rely on the compiler's DCE to optimize them.
+    template <bool kCanonicalYDir>
     SK_ALWAYS_INLINE void processRowSpan(int32_t row,
                                          uint8_t leftMask, uint8_t rightMask,
                                          bool leftInvert, bool midInvert, bool rightInvert,
                                          bool crossedTop,
                                          const std::array<float, kTileHeight + 1>& rowInt,
-                                         const LineStepParams& params,
-                                         bool canonicalYDir) {
+                                         const LineStepParams& params) {
         float pTopX = rowInt[row];
         float pBotX = rowInt[row + 1];
 
@@ -567,36 +541,36 @@ private:
                 params.fTBaseFixed + (params.fStepYFixed * row) + (params.fStepXFixed * xStart);
         SwarPixel* rowSubsampleWindings = fSubsampleWinding[row];
 
-        PixelBytes pMidInvert(midInvert ? 1 : 0);
-
+        uint8_t invertByte = kIsWinding ? 0xff : 1;
         if (xStart == xEnd) {
             uint8_t combinedMask = leftMask & rightMask;
-            processPixel</*kIsEdgePixel=*/true>(&rowSubsampleWindings[xStart], combinedMask,
-                                                PixelBytes(leftInvert ? 1 : 0), tFixed,
-                                                params.fMaskRowLut, canonicalYDir);
+            processPixel<kCanonicalYDir, /*kIsEdgePixel=*/true>(
+                    &rowSubsampleWindings[xStart], combinedMask, leftInvert ? invertByte : 0,
+                    tFixed, params.fMaskRowLut);
             tFixed += params.fStepXFixed;
         } else {
-            processPixel</*kIsEdgePixel=*/true>(&rowSubsampleWindings[xStart], leftMask,
-                                                PixelBytes(leftInvert ? 1 : 0), tFixed,
-                                                params.fMaskRowLut, canonicalYDir);
+            processPixel<kCanonicalYDir, /*kIsEdgePixel=*/true>(
+                    &rowSubsampleWindings[xStart], leftMask, leftInvert ? invertByte : 0, tFixed,
+                    params.fMaskRowLut);
             tFixed += params.fStepXFixed;
 
             for (int32_t column = xStart + 1; column < xEnd; ++column) {
-                processPixel</*kIsEdgePixel=*/false>(&rowSubsampleWindings[column], 0, pMidInvert,
-                                                     tFixed, params.fMaskRowLut, canonicalYDir);
+                processPixel<kCanonicalYDir, /*kIsEdgePixel=*/false>(
+                        &rowSubsampleWindings[column], 0, midInvert ? invertByte : 0, tFixed,
+                        params.fMaskRowLut);
                 tFixed += params.fStepXFixed;
             }
 
-            processPixel</*kIsEdgePixel=*/true>(&rowSubsampleWindings[xEnd], rightMask,
-                                                PixelBytes(rightInvert ? 1 : 0), tFixed,
-                                                params.fMaskRowLut, canonicalYDir);
+            processPixel<kCanonicalYDir, /*kIsEdgePixel=*/true>(
+                    &rowSubsampleWindings[xEnd], rightMask, rightInvert ? invertByte : 0, tFixed,
+                    params.fMaskRowLut);
             tFixed += params.fStepXFixed;
         }
 
         if (crossedTop) {
             uint8_t fillByte;
             if constexpr (kIsWinding) {
-                fillByte = canonicalYDir ? 1 : 0xFF;
+                fillByte = kCanonicalYDir ? 1 : 0xFF;
             } else {
                 fillByte = 1;
             }
@@ -631,12 +605,9 @@ private:
 
     SwarPixel fSubsampleWinding[kTileHeight][kTileWidth];
     int32_t fCoarseWinding;
-    SkTDArray<Strip>* fStripBuf;
-    SkTDArray<uint8_t>* fAlphaBuf;
     bool fIsInverse;
     const Polyline& fPolyline;
     const SkTDArray<uint8_t>& fMaskLut;
-    int32_t fLocalAlphaIdx;
 #if defined(GPU_TEST_UTILS)
     MsaaExactMaskObserver fObserver;
 #endif

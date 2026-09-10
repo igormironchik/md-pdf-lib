@@ -21,7 +21,7 @@
 namespace skgpu::graphite {
 
 // This is the main control to version the serialized Pipelines (c.f. stream_is_blob)
-static const int kCurrent_Version = 2;
+static const int kCurrent_Version = 3;
 
 namespace {
 
@@ -208,6 +208,10 @@ constexpr bool is_valid_samplecount(uint32_t sampleCount) {
         }
 
         while (stream->getPosition() < endOfKey) {
+            int32_t rootBlockHeader;
+            if (!stream->readS32(&rootBlockHeader) || rootBlockHeader >= 0) {
+                return false;
+            }
             if (!block_contains_ext_format(shaderCodeDictionary, stream, containsExtFormat)) {
                 return false;
             }

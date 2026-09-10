@@ -7,7 +7,6 @@
 #include "include/gpu/graphite/Recorder.h"
 
 #include "include/core/SkBitmap.h"
-#include "include/core/SkCPURecorder.h"
 #include "include/core/SkCanvas.h"
 #include "include/core/SkImage.h"
 #include "include/core/SkImageInfo.h"
@@ -125,7 +124,6 @@ Recorder::Recorder(sk_sp<SharedContext> sharedContext,
         , fRuntimeEffectDict(sk_make_sp<RuntimeEffectDictionary>())
         , fRootTaskList(new TaskList)
         , fRootUploads(new UploadList)
-        , fFloatStorageManager(sk_make_sp<FloatStorageManager>())
         , fProxyReadCounts(new ProxyReadCountMap)
         , fUniqueID(next_id())
         , fRequireOrderedRecordings(options.fRequireOrderedRecordings.has_value()
@@ -191,9 +189,7 @@ Recorder::~Recorder() {
 
 BackendApi Recorder::backend() const { return fSharedContext->backend(); }
 
-skcpu::Recorder* Recorder::cpuRecorder() {
-    return skcpu::Recorder::TODO();
-}
+skcpu::Recorder* Recorder::cpuRecorder() { return skcpu::Recorder::TODO(); }
 
 std::unique_ptr<Recording> Recorder::snap() {
     TRACE_EVENT0_ALWAYS("skia.gpu", TRACE_FUNC);
@@ -218,10 +214,25 @@ std::unique_ptr<Recording> Recorder::snap() {
                                                                                  : SK_InvalidGenID,
                                                        std::move(fTargetProxyData),
                                                        std::move(fFinishedProcs)));
+    if (fSharedContext->captureManager() &&
+        fSharedContext->captureManager()->isCurrentlyCapturing()) {
+        skia_private::TArray<uint32_t> activeStorageIDs;
+        for (const auto& device : fTrackedDevices) {
+            if (device && device->target().proxy()) {
+                activeStorageIDs.push_back(device->target().proxy()->getPixelStorageId());
+            }
+        }
+        skia_private::TArray<sk_sp<SkPicture>> allCaptured = std::move(fCapturedPictures);
+        auto remaining = fSharedContext->captureManager()->snapDrawTasksForStorageIDs(
+                activeStorageIDs);
+        for (auto& pic : remaining) {
+            allCaptured.push_back(std::move(pic));
+        }
+        recording->priv().setCapturedPictures(std::move(allCaptured));
+    }
     // Allow the buffer managers to add any collected tasks for data transfer or initialization
     // before moving the root task list to the Recording.
-    bool valid = fFloatStorageManager->finalize(fDrawBufferManager.get());
-    valid &= fDrawBufferManager->transferToRecording(recording.get());
+    bool valid = fDrawBufferManager->transferToRecording(recording.get());
 
     // We create the Recording's full task list even if the DrawBufferManager failed because it is
     // a convenient way to ensure everything else is unmapped and reset for the next Recording.
@@ -261,7 +272,11 @@ std::unique_ptr<Recording> Recorder::snap() {
     // Remaining cleanup that must always happen regardless of success or failure
     fRuntimeEffectDict = sk_make_sp<RuntimeEffectDictionary>();
     fProxyReadCounts = std::make_unique<ProxyReadCountMap>();
-    fFloatStorageManager = sk_make_sp<FloatStorageManager>();
+    for (const auto& device : fTrackedDevices) {
+        if (device) {
+            device->resetStorageCache();
+        }
+    }
     if (!fRequireOrderedRecordings) {
         fAtlasProvider->invalidateAtlases();
     }
@@ -306,8 +321,11 @@ SkCanvas* Recorder::makeCaptureCanvas(SkCanvas* canvas) {
 }
 
 void Recorder::createCaptureBreakpoint(SkSurface* surface) {
-   if (fSharedContext->captureManager()) {
-        fSharedContext->captureManager()->snapPicture(surface);
+    if (fSharedContext->captureManager()) {
+        auto picture = fSharedContext->captureManager()->snapPicture(surface);
+        if (picture) {
+            fCapturedPictures.push_back(std::move(picture));
+        }
     }
 }
 

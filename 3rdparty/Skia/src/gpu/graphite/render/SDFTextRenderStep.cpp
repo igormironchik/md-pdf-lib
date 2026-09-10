@@ -71,6 +71,7 @@ SDFTextRenderStep::SDFTextRenderStep(Layout layout)
                       {"strikeToSourceScale", VertexAttribType::kFloat, SkSLType::kFloat},
                       {"depth", VertexAttribType::kFloat, SkSLType::kFloat},
                       {"ssboIndex", VertexAttribType::kUInt, SkSLType::kUInt}}},
+                     /*storageUniforms=*/{},
                      /*varyings=*/
                      {{{"unormTexCoords", SkSLType::kFloat2},
                       {"textureCoords", SkSLType::kFloat2},
@@ -78,7 +79,7 @@ SDFTextRenderStep::SDFTextRenderStep(Layout layout)
 
 SDFTextRenderStep::~SDFTextRenderStep() {}
 
-std::string SDFTextRenderStep::vertexSkSL() const {
+std::string SDFTextRenderStep::vertexSkSL(const RootNodesInfo&) const {
     // Returns the body of a vertex function, which must define a float4 devPosition variable and
     // must write to an already-defined float2 stepLocalCoords variable.
     return "texIndex = half(indexAndFlags.x);"
@@ -129,6 +130,7 @@ const char* SDFTextRenderStep::fragmentCoverageSkSL() const {
 }
 
 void SDFTextRenderStep::writeVertices(DrawWriter* dw,
+                                      StorageContext* /*storageContext*/,
                                       const DrawParams& params,
                                       uint32_t ssboIndex) const {
     const SubRunData& subRunData = params.geometry().subRunData();
@@ -154,7 +156,7 @@ void SDFTextRenderStep::writeUniformsAndTextures(const DrawParams& params,
     Recorder* recorder = subRunData.recorder();
     const sk_sp<TextureProxy>* proxies =
             recorder->priv().atlasProvider()->textAtlasManager()->getProxies(
-                    subRunData.subRun()->maskFormat(), &numProxies);
+                    subRunData.resolvedMaskFormat(), &numProxies);
     SkASSERT(proxies && numProxies > 0);
 
     // write uniforms

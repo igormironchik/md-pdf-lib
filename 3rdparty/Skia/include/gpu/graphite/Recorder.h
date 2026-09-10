@@ -8,10 +8,10 @@
 #ifndef skgpu_graphite_Recorder_DEFINED
 #define skgpu_graphite_Recorder_DEFINED
 
-#include "include/core/SkCPURecorder.h"
 #include "include/core/SkRecorder.h"
 #include "include/core/SkRefCnt.h"
 #include "include/core/SkSurface.h"
+#include "include/cpu/Recorder.h"
 #include "include/gpu/graphite/GraphiteTypes.h"
 #include "include/gpu/graphite/Recording.h"
 #include "include/private/SingleOwner.h"
@@ -52,7 +52,6 @@ class BackendTexture;
 class Context;
 class Device;
 class DrawBufferManager;
-class FloatStorageManager;
 class ImageProvider;
 class PaintParamsKeyBuilder;
 class PipelineDataGatherer;
@@ -299,7 +298,6 @@ private:
     std::unique_ptr<UploadBufferManager> fUploadBufferManager;
     // Depends on fUploadBufferManager (holds a pointer to it). Must be destroyed first.
     std::unique_ptr<DrawBufferManager> fDrawBufferManager;
-    sk_sp<FloatStorageManager> fFloatStorageManager;
     std::unique_ptr<ProxyReadCountMap> fProxyReadCounts;
 
     skia_private::STArray<kMaxKeyAndDataBuilders, std::unique_ptr<KeyAndDataBuilder>>

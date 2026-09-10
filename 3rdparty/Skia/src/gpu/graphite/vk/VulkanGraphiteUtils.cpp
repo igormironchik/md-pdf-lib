@@ -7,6 +7,7 @@
 
 #include "src/gpu/graphite/vk/VulkanGraphiteUtils.h"
 
+#include "include/core/SkContext.h"
 #include "include/core/SkStream.h"
 #include "include/gpu/ShaderErrorHandler.h"
 #include "include/gpu/graphite/Context.h"
@@ -19,6 +20,16 @@
 #include "src/gpu/graphite/vk/VulkanSampler.h"
 #include "src/gpu/graphite/vk/VulkanSharedContext.h"
 #include "src/sksl/SkSLProgramSettings.h"
+
+namespace SkContexts {
+
+// Creates a context wrapping a Graphite GPU backend with Vulkan
+std::unique_ptr<SkContext> MakeGraphite(const skgpu::VulkanBackendContext& vkContext,
+                              const SkContextOptions& options) {
+    return nullptr;
+}
+
+}  // namespace SkContexts
 
 namespace skgpu::graphite::ContextFactory {
 
@@ -230,6 +241,21 @@ VkShaderStageFlags PipelineStageFlagsToVkShaderStageFlags(
     }
     if (stageFlags & PipelineStageFlags::kCompute) {
         vkStageFlags |= VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    return vkStageFlags;
+}
+
+VkPipelineStageFlags PipelineStageFlagsToVkPipelineStageFlags(
+        SkEnumBitMask<PipelineStageFlags> stageFlags) {
+    VkPipelineStageFlags vkStageFlags = 0;
+    if (stageFlags & PipelineStageFlags::kVertexShader) {
+        vkStageFlags |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+    }
+    if (stageFlags & PipelineStageFlags::kFragmentShader) {
+        vkStageFlags |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    }
+    if (stageFlags & PipelineStageFlags::kCompute) {
+        vkStageFlags |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     }
     return vkStageFlags;
 }

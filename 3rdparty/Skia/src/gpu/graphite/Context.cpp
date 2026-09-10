@@ -43,15 +43,15 @@
 #include "src/capture/SkCapture.h"
 #include "src/capture/SkCaptureManager.h"
 #include "src/core/SkAutoPixmapStorage.h"
-#include "src/core/SkCPUContextImpl.h"
-#include "src/core/SkCPURecorderImpl.h"
 #include "src/core/SkColorSpaceXformSteps.h"
 #include "src/core/SkConvertPixels.h"
 #include "src/core/SkImageInfoPriv.h"
 #include "src/core/SkRectMemcpy.h"
+#include "src/core/SkSafeMath.h"
 #include "src/core/SkTraceEvent.h"
 #include "src/core/SkYUVMath.h"
 #include "src/gpu/AsyncReadTypes.h"
+#include "src/gpu/GlobalResourceStats.h"
 #include "src/gpu/GpuTypesPriv.h"
 #include "src/gpu/SkBackingFit.h"
 #include "src/gpu/graphite/AtlasProvider.h"
@@ -64,6 +64,7 @@
 #include "src/gpu/graphite/Image_Graphite.h"
 #include "src/gpu/graphite/QueueManager.h"
 #include "src/gpu/graphite/RecorderPriv.h"
+#include "src/gpu/graphite/RecordingPriv.h"
 #include "src/gpu/graphite/RendererProvider.h"
 #include "src/gpu/graphite/ResourceProvider.h"
 #include "src/gpu/graphite/ResourceTypes.h"
@@ -127,8 +128,7 @@ Context::Context(sk_sp<SharedContext> sharedContext,
     // We need to move the Graphite SkSL code into the central SkSL data loader at least once
     // (but preferrably only once) before we try to use it. We assume that there's no way to
     // use the SkSL code without making a context, so we initialize it here.
-    static SkOnce once;
-    once([] { SkSL::Loader::SetGraphiteModuleData(SkSL::Loader::GetGraphiteModules()); });
+    SkSL::Loader::LoadGraphiteModules();
 
     // We have to create this outside the initializer list because we need to pass in the Context's
     // SingleOwner object and it is declared last
@@ -146,7 +146,6 @@ Context::Context(sk_sp<SharedContext> sharedContext,
                                                        options.fPipelineCachingCallback,
                                                        options.fPipelineCallback);
 
-    fCPUContext = std::make_unique<skcpu::ContextImpl>();
     if (options.fEnableCapture) {
         fSharedContext->setCaptureManager(sk_make_sp<SkCaptureManager>());
     }
@@ -155,6 +154,20 @@ Context::Context(sk_sp<SharedContext> sharedContext,
 }
 
 Context::~Context() {
+    // The PipelineManager uses the Context's SkExecutor but it, and the SharedContext,
+    // could be kept alive after this call via a PrecompileContext. In order to make the
+    // usage lifetime of the executor manageable, remove the PipelineManager's usage
+    // of the executor here. This means that if any PrecompileContext's outlive their
+    // generating Context they will revert to serial, in-line compilation.
+    //
+    // A side effect of terminating threaded compilation here is that any threaded
+    // tasks (that rely on the SharedContext's existence) are cleared out.
+    //
+    // Note that, because this is happening on the main thread, the PipelineManager should not
+    // be waiting to resolve any Pipelines (in resolveHandle/potentiallyWaitOn) so we
+    // shouldn't deadlock.
+    fSharedContext->pipelineManager()->shutDown();
+
 #if defined(GPU_TEST_UTILS)
     SkAutoMutexExclusive lock(fTestingLock);
     for (auto& recorder : fTrackedRecorders) {
@@ -214,7 +227,7 @@ std::unique_ptr<Recorder> Context::makeRecorder(const RecorderOptions& options) 
 std::unique_ptr<skcpu::Recorder> Context::makeCPURecorder() {
     ASSERT_SINGLE_OWNER
 
-    return std::make_unique<skcpu::RecorderImpl>(fCPUContext.get());
+    return std::make_unique<skcpu::Recorder>();
 }
 
 std::unique_ptr<PrecompileContext> Context::makePrecompileContext() {
@@ -241,6 +254,14 @@ std::unique_ptr<Recorder> Context::makeInternalRecorder() const {
 
 InsertStatus Context::insertRecording(const InsertRecordingInfo& info) {
     ASSERT_SINGLE_OWNER
+
+    if (fSharedContext->captureManager() &&
+        fSharedContext->captureManager()->isCurrentlyCapturing() &&
+        info.fRecording) {
+        fSharedContext->captureManager()->onInsertRecording(
+            info.fRecording->priv().capturedPictures()
+        );
+    }
 
     return fQueueManager->addRecording(info, this);
 }
@@ -750,9 +771,14 @@ Context::PixelTransferResult Context::transferPixels(Recorder* recorder,
         return {};
     }
 
+    SkSafeMath safe;
     int bpp = TextureFormatBytesPerBlock(format);
-    size_t rowBytes = caps->getAlignedTextureDataRowBytes(bpp * srcRect.width());
-    size_t size = SkAlignTo(rowBytes * srcRect.height(), caps->requiredTransferBufferAlignment());
+    size_t rowBytes = caps->getAlignedTextureDataRowBytes(safe.mul(bpp, srcRect.width()), bpp);
+    size_t size = safe.alignUp(safe.mul(rowBytes, srcRect.height()),
+                               caps->requiredTransferBufferAlignment());
+    if (!safe.ok() || rowBytes == 0 || size == 0) {
+        return {};
+    }
     sk_sp<Buffer> buffer = fResourceProvider->findOrCreateNonShareableBuffer(
             size, BufferType::kXferGpuToCpu, AccessPattern::kHostVisible, "TransferToCpu");
     if (!buffer) {
@@ -813,6 +839,8 @@ void Context::checkForFinishedWork(SyncToCpu syncToCpu) {
     // Process the return queue periodically to make sure it doesn't get too big
     fResourceProvider->forceProcessReturnedResources();
     fSharedContext->forceProcessReturnedResources();
+
+    GlobalResourceStats::TraceStatsSummary();
 }
 
 void Context::checkAsyncWorkCompletion() {

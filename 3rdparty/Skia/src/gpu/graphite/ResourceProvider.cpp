@@ -11,6 +11,7 @@
 #include "include/core/SkTileMode.h"
 #include "include/gpu/graphite/BackendTexture.h"
 #include "include/private/SkLog.h"
+#include "src/gpu/GlobalResourceStats.h"
 #include "src/gpu/graphite/Buffer.h"
 #include "src/gpu/graphite/Caps.h"
 #include "src/gpu/graphite/CommandBuffer.h"
@@ -18,17 +19,13 @@
 #include "src/gpu/graphite/ContextPriv.h"
 #include "src/gpu/graphite/ContextUtils.h"
 #include "src/gpu/graphite/GlobalCache.h"
-#include "src/gpu/graphite/GraphicsPipeline.h"
-#include "src/gpu/graphite/GraphicsPipelineHandle.h"
-#include "src/gpu/graphite/PipelineCreationTask.h"
-#include "src/gpu/graphite/PipelineManager.h"
 #include "src/gpu/graphite/RenderPassDesc.h"
 #include "src/gpu/graphite/RendererProvider.h"
 #include "src/gpu/graphite/ResourceCache.h"
-#include "src/gpu/graphite/RuntimeEffectDictionary.h"
 #include "src/gpu/graphite/Sampler.h"
 #include "src/gpu/graphite/SharedContext.h"
 #include "src/gpu/graphite/Texture.h"
+#include "src/gpu/graphite/TextureUtils.h"
 #include "src/sksl/SkSLCompiler.h"
 
 namespace skgpu::graphite {
@@ -42,34 +39,6 @@ ResourceProvider::ResourceProvider(SharedContext* sharedContext,
 
 ResourceProvider::~ResourceProvider() {
     fResourceCache->shutdown();
-}
-
-GraphicsPipelineHandle ResourceProvider::createGraphicsPipelineHandle(
-        const GraphicsPipelineDesc& pipelineDesc,
-        const RenderPassDesc& renderPassDesc,
-        SkEnumBitMask<PipelineCreationFlags> pipelineCreationFlags) {
-
-    PipelineManager* pipelineManager = fSharedContext->pipelineManager();
-
-    return pipelineManager->createHandle(fSharedContext,
-                                         pipelineDesc,
-                                         renderPassDesc,
-                                         pipelineCreationFlags);
-}
-
-void ResourceProvider::startPipelineCreationTask(sk_sp<const RuntimeEffectDictionary> runtimeDict,
-                                                 const GraphicsPipelineHandle& handle) {
-    PipelineManager* pipelineManager = fSharedContext->pipelineManager();
-
-    pipelineManager->startPipelineCreationTask(fSharedContext,
-                                               std::move(runtimeDict),
-                                               handle);
-}
-
-sk_sp<GraphicsPipeline> ResourceProvider::resolveHandle(const GraphicsPipelineHandle& handle) {
-    PipelineManager* pipelineManager = fSharedContext->pipelineManager();
-
-    return pipelineManager->resolveHandle(handle);
 }
 
 sk_sp<ComputePipeline> ResourceProvider::findOrCreateComputePipeline(
@@ -271,7 +240,12 @@ BackendTexture ResourceProvider::createBackendTexture(SkISize dimensions, const 
     if (!dimensions_are_valid(fSharedContext->caps()->maxTextureSize(), dimensions)) {
         return {};
     }
-    return this->onCreateBackendTexture(dimensions, info);
+    auto tex = this->onCreateBackendTexture(dimensions, info);
+    if (tex.isValid()) {
+        GlobalResourceStats::RecordCreateBackendTexture(info.isProtected(),
+                                                        ComputeSize(dimensions, info));
+    }
+    return tex;
 }
 
 #ifdef SK_BUILD_FOR_ANDROID
@@ -283,11 +257,17 @@ BackendTexture ResourceProvider::createBackendTexture(AHardwareBuffer* hardwareB
     if (!dimensions_are_valid(fSharedContext->caps()->maxTextureSize(), dimensions)) {
         return {};
     }
-    return this->onCreateBackendTexture(hardwareBuffer,
-                                        isRenderable,
-                                        isProtectedContent,
-                                        dimensions,
-                                        fromAndroidWindow);
+    auto tex = this->onCreateBackendTexture(hardwareBuffer,
+                                            isRenderable,
+                                            isProtectedContent,
+                                            dimensions,
+                                            fromAndroidWindow);
+    if (tex.isValid()) {
+        const TextureInfo& info = tex.info();
+        GlobalResourceStats::RecordCreateBackendTexture(info.isProtected(),
+                                                        ComputeSize(dimensions, info));
+    }
+    return tex;
 }
 
 BackendTexture ResourceProvider::onCreateBackendTexture(AHardwareBuffer*,
@@ -300,6 +280,10 @@ BackendTexture ResourceProvider::onCreateBackendTexture(AHardwareBuffer*,
 #endif
 
 void ResourceProvider::deleteBackendTexture(const BackendTexture& texture) {
+    if (texture.isValid()) {
+        GlobalResourceStats::RecordDeleteBackendTexture(
+                texture.info().isProtected(), ComputeSize(texture.dimensions(), texture.info()));
+    }
     this->onDeleteBackendTexture(texture);
 }
 

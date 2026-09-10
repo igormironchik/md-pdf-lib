@@ -489,7 +489,14 @@ sk_sp<DawnGraphicsPipeline> DawnGraphicsPipeline::Make(
     // layout and passed in to the pipline constructor for lifetime management.
     skia_private::TArray<sk_sp<DawnSampler>> immutableSamplers;
     {
-        groupLayouts[0] = sharedContext->getUniformBuffersBindGroupLayout();
+        wgpu::ShaderStage storageVisibility = wgpu::ShaderStage::None;
+        if (shaderInfo->vsUsesStorage()) {
+            storageVisibility |= wgpu::ShaderStage::Vertex;
+        }
+        if (shaderInfo->fsUsesStorage()) {
+            storageVisibility |= wgpu::ShaderStage::Fragment;
+        }
+        groupLayouts[0] = sharedContext->getUniformBuffersBindGroupLayout(storageVisibility);
         if (!groupLayouts[0]) {
             return {};
         }
@@ -631,7 +638,7 @@ sk_sp<DawnGraphicsPipeline> DawnGraphicsPipeline::Make(
     TArray<wgpu::VertexAttribute> appendDataAttributes;
     {
         // Note: the shaderLocationOffset in this function call needs to be the staticAttributeSize
-        auto arrayStride = create_vertex_attributes(step->appendAttributes(),
+        auto arrayStride = create_vertex_attributes(shaderInfo->appendAttributes(),
                                                     step->staticAttributes().size(),
                                                     &appendDataAttributes);
         auto& layout = vertexBufferLayouts[kAppendDataBufferIndex];

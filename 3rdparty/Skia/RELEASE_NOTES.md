@@ -2,6 +2,41 @@ Skia Graphics Release Notes
 
 This file includes a list of high level updates for each milestone release.
 
+Milestone 153
+-------------
+  * `SkLogHandler` has been added as a global callback interface to intercept Skia's internal logs. Clients can implement this interface and install it via `SkLogHandler::SetInstance` to receive all messages generated through the `SKIA_LOG` macros. `SkLogHandler` uses `sk_sp` for shared ownership, allowing clients to maintain a reference to the handler.
+  * `SkImageFilters::RuntimeShader` factories now take an optional
+    `restrictOutputToInputBounds` parameter (default `false`). When `true`, the
+    caller promises that the SkSL evaluates to transparent black wherever its child
+    shaders are transparent black, allowing the filter's output to be restricted to
+    the union of its inputs' bounds instead of being unbounded. This lets effects
+    composed after the runtime shader (e.g. a blur using a non-decal tile mode)
+    observe the intended content bounds.
+  * Added the `skia_enable_threadlocal_strikecache` GN build argument
+    (which defines `SK_ENABLE_THREADLOCAL_STRIKECACHE`) to enable
+    thread-local `SkStrikeCache` instances
+  * Graphite's `PipelineManager` can now make use of the `SkExecutor` passed in via `ContextOptions`. If provided, the `SkExecutor` will be used to compile Pipelines.
+
+* * *
+
+Milestone 152
+-------------
+  * Add skgpu::graphite::ContextOptions::fAvoidDepth. Enabling this will lead
+    graphite to avoid using the depth/stencil buffer, and fallback to analytic path
+    and turn off depth occlusion culling when necessary.
+  * Add SkRRect::contains(const SkPoint&). This allows point vs RRectF intersection
+    testing. As SkRRect::contains(const SkRectF&), returns true if the point is
+    inside the SkRRect and the SkRRect is not empty.
+  * Since SkPath data is now immutable and we always compute the bounds
+    upfront, SkPath::updateBoundsCache() no longer serves any purpose
+    and has been removed.
+  * Added a new `SkIcoRustDecoder` which decodes ICO and CUR images using Rust-based
+    PNG and BMP decoders for the embedded images. Register `SkIcoRustDecoder::Decoder()`
+    with `SkCodecs::Register` to enable it. This is built when `skia_use_rust_ico_decode`
+    is enabled (defining `SK_CODEC_DECODES_ICO_WITH_RUST`).
+
+* * *
+
 Milestone 151
 -------------
   * Added a 'containsExternalFormat' method to 'PrecompileContext'. This allows clients to determine if a serialized key contains an external format.

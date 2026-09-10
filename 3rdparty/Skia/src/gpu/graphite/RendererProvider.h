@@ -8,6 +8,7 @@
 #ifndef skgpu_graphite_RendererProvider_DEFINED
 #define skgpu_graphite_RendererProvider_DEFINED
 
+#include "include/core/SkMesh.h"
 #include "include/core/SkPathTypes.h"
 #include "include/core/SkVertices.h"
 #include "include/private/SkTArray.h"
@@ -102,7 +103,9 @@ public:
         return &fStencilTessellatedWedges[(int) type];
     }
     const Renderer* convexTessellatedWedges() const { return &fConvexTessellatedWedges; }
-    const Renderer* tessellatedStrokes() const { return &fTessellatedStrokes; }
+    const Renderer* tessellatedStrokes(bool inverseFill) const {
+        return &fTessellatedStrokes[static_cast<size_t>(inverseFill)];
+    }
 
     // Coverage mask rendering. Used by the atlas path rendering strategies and rendering mask
     // filter results.
@@ -122,10 +125,12 @@ public:
     const Renderer* sdfText(bool useLCDText) const { return &fSDFText[useLCDText]; }
 
     // Mesh rendering
-    const Renderer* vertices(SkVertices::VertexMode mode, bool hasColors, bool hasTexCoords) const {
-        SkASSERT(mode != SkVertices::kTriangleFan_VertexMode); // Should be converted to kTriangles
-        bool triStrip = mode == SkVertices::kTriangleStrip_VertexMode;
-        return &fVertices[4*triStrip + 2*hasColors + hasTexCoords];
+    const Renderer* vertices(bool hasColors, bool hasTexCoords) const {
+        return &fVertices[2*hasColors + hasTexCoords];
+    }
+
+    const Renderer* mesh() const {
+        return &fMesh;
     }
 
     // Filled and stroked [r]rects
@@ -161,9 +166,15 @@ public:
     const VelloRenderer* velloRenderer() const { return fVelloRenderer.get(); }
 #endif
 
+#if defined(SK_ENABLE_SPARSE_STRIPS)
+    const Renderer* sparseStripsEndCap() const { return &fSparseStrips[0]; }
+    const Renderer* sparseStripsWideTile() const { return &fSparseStrips[1]; }
+    SkSpan<const Renderer> sparseStrips() const { return {fSparseStrips, 2}; }
+#endif
+
 private:
     static constexpr int kPathTypeCount = 4;
-    static constexpr int kVerticesCount = 8; // 2 modes * 2 color configs * 2 tex coord configs
+    static constexpr int kVerticesCount = 4; // 2 color configs * 2 tex coord configs
 
     friend class Context; // for ctor
 
@@ -195,7 +206,7 @@ private:
     Renderer fStencilTessellatedCurves[kPathTypeCount];
     Renderer fStencilTessellatedWedges[kPathTypeCount];
     Renderer fConvexTessellatedWedges;
-    Renderer fTessellatedStrokes;
+    Renderer fTessellatedStrokes[2]; // bool inverseFill;
 
     Renderer fCoverageMask;
 
@@ -210,6 +221,11 @@ private:
     Renderer fAnalyticBlur;
 
     Renderer fVertices[kVerticesCount];
+    Renderer fMesh;
+
+#if defined(SK_ENABLE_SPARSE_STRIPS)
+    Renderer fSparseStrips[2]; // kEndCap, and kWideTile
+#endif
 
     // Aggregate of all enabled Renderers for convenient iteration when pre-compiling
     skia_private::TArray<const Renderer*> fRenderers;

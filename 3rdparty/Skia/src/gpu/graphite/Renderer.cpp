@@ -20,23 +20,46 @@ RenderStep::RenderStep(Layout layout,
                        DepthStencilSettings depthStencilSettings,
                        SkSpan<const Attribute> staticAttrs,
                        SkSpan<const Attribute> appendAttrs,
+                       SkSpan<const Uniform> storageUniforms,
                        SkSpan<const Varying> varyings)
         : fRenderStepID(renderStepID)
         , fFlags(flags)
+        , fStorageBufferStages(
+                  (SkToBool(flags & Flags::kVsUsesStorage) ? PipelineStageFlags::kVertexShader
+                                                           : PipelineStageFlags{}) |
+                  (SkToBool(flags & Flags::kFsUsesStorage) ? PipelineStageFlags::kFragmentShader
+                                                           : PipelineStageFlags{}))
         , fPrimitiveType(primitiveType)
         , fDepthStencilSettings(depthStencilSettings)
         , fUniforms(uniforms)
         , fStaticAttrs(staticAttrs.begin(), staticAttrs.end())
         , fAppendAttrs(appendAttrs.begin(), appendAttrs.end())
+        , fStorageUniforms(storageUniforms.begin(), storageUniforms.end())
         , fVaryings(varyings.begin(), varyings.end())
         , fUniformAlignment(0)
         , fStaticDataStride(0)
-        , fAppendDataStride(0) {
+        , fAppendDataStride(0)
+        , fStorageUniformStride(0)
+        , fStorageUniformAlignment(1) {
+    SkASSERT(fStorageUniforms.empty() ||
+             SkToBool(fStorageBufferStages & (PipelineStageFlags::kVertexShader |
+                                              PipelineStageFlags::kFragmentShader)));
     for (auto v : this->staticAttributes()) {
         fStaticDataStride += v.sizeAlign4();
     }
     for (auto i : this->appendAttributes()) {
         fAppendDataStride += i.sizeAlign4();
+    }
+
+    if (!fStorageUniforms.empty()) {
+        // Storage uniforms are backed by a storage buffer or emulated via a fallback texture.
+        // In both cases the struct layout follows Std430.
+        UniformOffsetCalculator calculator = UniformOffsetCalculator::ForStruct(Layout::kStd430);
+        for (const auto& u : fStorageUniforms) {
+            calculator.advanceOffset(u.type(), u.count());
+        }
+        fStorageUniformAlignment = calculator.requiredAlignment();
+        fStorageUniformStride = SkAlignTo<size_t>(calculator.size(), fStorageUniformAlignment);
     }
 
     UniformOffsetCalculator calculator = UniformOffsetCalculator::ForTopLevel(layout);

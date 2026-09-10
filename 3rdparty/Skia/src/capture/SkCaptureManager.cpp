@@ -15,6 +15,7 @@
 #include "src/capture/SkCaptureCanvas.h"
 #include "src/image/SkSurface_Base.h"
 
+#include <algorithm>
 #include <memory>
 
 SkCaptureManager::SkCaptureManager() {}
@@ -26,46 +27,99 @@ SkCanvas* SkCaptureManager::makeCaptureCanvas(SkCanvas* canvas) {
     return rawCanvasPtr;
 }
 
-void SkCaptureManager::processCanvasContent(SkCaptureCanvas* canvas) {
+sk_sp<SkPicture> SkCaptureManager::snapAndIncrement(SkCaptureCanvas* canvas) {
     auto picture = canvas->snapPicture();
     if (picture) {
-        if (auto surfacePixelStorage = asSB(canvas->getBaseCanvasSurface())->getPixelStorage()) {
-            surfacePixelStorage->incrementContentId();
+        if (auto storage = asSB(canvas->getBaseCanvasSurface())->getPixelStorage()) {
+            storage->incrementContentId();
         }
-        fPictures.emplace_back(picture);
     }
+    return picture;
 }
 
-void SkCaptureManager::snapPictures() {
+void SkCaptureManager::captureUninsertedDrawTasks() {
     for (auto& canvas : fTrackedCanvases) {
         if (canvas) {
-            this->processCanvasContent(canvas.get());
+            auto picture = this->snapAndIncrement(canvas.get());
+            if (picture && fActiveCapture) {
+                fActiveCapture->addAsset(std::move(picture));
+            }
         }
     }
 }
 
 // TODO: make thread safe by using exchange() and a mutex.
 void SkCaptureManager::toggleCapture(bool capturing) {
-    if (capturing != fIsCurrentlyCapturing && !capturing) {
-        // on capture stop, save the capture and reset
-        this->snapPictures();
-        fLastCapture = SkCapture::MakeFromPictures(fPictures);
-        fPictures.clear();
+    if (capturing != fIsCurrentlyCapturing) {
+        if (capturing) {
+            fActiveCapture = SkCapture::MakeEmpty();
+        } else {
+            // on capture stop, save the capture and reset
+            this->captureUninsertedDrawTasks();
+            fLastCapture = std::move(fActiveCapture);
+        }
     }
     fIsCurrentlyCapturing = capturing;
 }
 
-void SkCaptureManager::snapPicture(SkSurface* surface) {
+sk_sp<SkPicture> SkCaptureManager::snapPicture(SkSurface* surface) {
     for (auto& canvas : fTrackedCanvases) {
         if (canvas) {
             if (canvas->getBaseCanvasSurface() == surface) {
-                this->processCanvasContent(canvas.get());
+                return this->snapAndIncrement(canvas.get());
             }
         }
     }
+    return nullptr;
 }
 
 
 sk_sp<SkCapture> SkCaptureManager::getLastCapture() const {
    return fLastCapture;
+}
+
+skia_private::TArray<sk_sp<SkPicture>> SkCaptureManager::snapDrawTasksForStorageIDs(
+        SkSpan<const uint32_t> storageIds) {
+    skia_private::TArray<sk_sp<SkPicture>> snapped;
+    if (!fIsCurrentlyCapturing || storageIds.empty()) {
+        return snapped;
+    }
+
+    for (auto& canvas : fTrackedCanvases) {
+        if (!canvas) {
+            continue;
+        }
+        SkSurface* surface = canvas->getBaseCanvasSurface();
+        if (!surface) {
+            continue;
+        }
+        auto storage = asSB(surface)->getPixelStorage();
+        if (!storage) {
+            continue;
+        }
+        uint32_t id = storage->getPixelStorageId();
+        if (std::find(storageIds.begin(), storageIds.end(), id) != storageIds.end()) {
+            if (auto picture = this->snapAndIncrement(canvas.get())) {
+                snapped.push_back(std::move(picture));
+            }
+        }
+    }
+    return snapped;
+}
+
+void SkCaptureManager::onInsertRecording(const skia_private::TArray<sk_sp<SkPicture>>& capturedPictures) {
+    if (!fIsCurrentlyCapturing || !fActiveCapture) return;
+
+    skia_private::TArray<SkCapture::DrawTask> drawTasks;
+    for (const auto& pic : capturedPictures) {
+        fActiveCapture->addAsset(pic);
+        uint32_t assetIdx = fActiveCapture->getMetadata().numAssets - 1;
+        drawTasks.push_back({assetIdx});
+    }
+
+    SkCapture::RecordingCapture rec = {
+        std::move(drawTasks)
+    };
+
+    fActiveCapture->addRecordingCapture(std::move(rec));
 }

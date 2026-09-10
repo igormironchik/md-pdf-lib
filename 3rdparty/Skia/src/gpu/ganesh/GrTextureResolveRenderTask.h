@@ -42,7 +42,13 @@ private:
         return ExpectedOutcome::kTargetUnchanged;
     }
 
-    bool onExecute(GrOpFlushState*) override;
+    ExecutionResult onExecute(GrOpFlushState*) override;
+
+    // addProxy() optimistically marks the proxy resolved/clean at recording time. If the flush
+    // is dropped before this task executes (or a per-target operation fails) we must restore the
+    // proxy's dirty state so a later flush will re-record the resolve.
+    bool requiresExplicitCleanup() const override { return true; }
+    void endFlush(GrDrawingManager*) override;
 
 #if defined(GPU_TEST_UTILS)
     const char* name() const final { return "TextureResolve"; }

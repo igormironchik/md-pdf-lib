@@ -39,7 +39,7 @@
 #endif
 
 #if defined(SK_CODEC_DECODES_BMP_WITH_RUST)
-#include "experimental/rust_bmp/decoder/SkBmpRustDecoder.h"
+#include "include/codec/SkBmpRustDecoder.h"
 #elif defined(SK_CODEC_DECODES_BMP)
 #include "include/codec/SkBmpDecoder.h"
 #endif
@@ -48,11 +48,15 @@
 #include "include/codec/SkGifDecoder.h"
 #endif
 
-#if defined(SK_CODEC_DECODES_ICO)
+#if defined(SK_CODEC_DECODES_ICO_WITH_RUST)
+#include "experimental/rust_ico/decoder/SkIcoRustDecoder.h"
+#elif defined(SK_CODEC_DECODES_ICO)
 #include "include/codec/SkIcoDecoder.h"
 #endif
 
-#if defined(SK_CODEC_DECODES_JPEG)
+#if defined(SK_CODEC_DECODES_JPEG_WITH_RUST)
+#include "experimental/rust_jpeg/decoder/SkJpegRustDecoder.h"
+#elif defined(SK_CODEC_DECODES_JPEG)
 #include "include/codec/SkJpegDecoder.h"
 #endif
 
@@ -93,7 +97,9 @@ static std::vector<Decoder>* get_decoders_for_editing() {
 #elif defined(SK_CODEC_DECODES_PNG_WITH_RUST)
             decoders->push_back(SkPngRustDecoder::Decoder());
 #endif
-#if defined(SK_CODEC_DECODES_JPEG)
+#if defined(SK_CODEC_DECODES_JPEG_WITH_RUST)
+            decoders->push_back(SkJpegRustDecoder::Decoder());
+#elif defined(SK_CODEC_DECODES_JPEG)
             decoders->push_back(SkJpegDecoder::Decoder());
 #endif
 #if defined(SK_CODEC_DECODES_WEBP)
@@ -102,7 +108,9 @@ static std::vector<Decoder>* get_decoders_for_editing() {
 #if defined(SK_CODEC_DECODES_GIF) || defined(SK_HAS_WUFFS_LIBRARY)
             decoders->push_back(SkGifDecoder::Decoder());
 #endif
-#if defined(SK_CODEC_DECODES_ICO)
+#if defined(SK_CODEC_DECODES_ICO_WITH_RUST)
+            decoders->push_back(SkIcoRustDecoder::Decoder());
+#elif defined(SK_CODEC_DECODES_ICO)
             decoders->push_back(SkIcoDecoder::Decoder());
 #endif
 

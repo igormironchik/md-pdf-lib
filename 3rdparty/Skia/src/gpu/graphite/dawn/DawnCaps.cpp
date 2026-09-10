@@ -115,8 +115,12 @@ void DawnCaps::initFormatTable(const wgpu::Device& device) {
             continue;
         }
 
-        // At this point, we can claim at least 1 sample is supported
+        // At this point, we can claim at least single sample and read is supported; all valid
+        // formats in WebGPU support TextureBinding (nearest sampling / texel reads).
+        // See https://gpuweb.github.io/gpuweb/#texture-format-caps
+        supportedUsage |= TextureUsage::kRead;
         supportedSampleCounts = SampleCount::k1;
+
         if (formatCaps & DawnFormatFlag::Filter) {
             supportedUsage |= TextureUsage::kSample;
         }
@@ -172,7 +176,7 @@ std::pair<SkEnumBitMask<TextureUsage>, Tiling> DawnCaps::getTextureUsage(
             }
         }
         if (dawnInfo.fUsage & wgpu::TextureUsage::TextureBinding) {
-            usage |= TextureUsage::kSample;
+            usage |= TextureUsage::kRead | TextureUsage::kSample;
         }
         if (dawnInfo.fUsage & wgpu::TextureUsage::CopySrc) {
             usage |= TextureUsage::kCopySrc;
@@ -200,7 +204,7 @@ TextureInfo DawnCaps::onGetDefaultTextureInfo(SkEnumBitMask<TextureUsage> usage,
 
     wgpu::TextureUsage dawnUsage = wgpu::TextureUsage::None;
 
-    if (usage & TextureUsage::kSample) {
+    if (usage & (TextureUsage::kSample | TextureUsage::kRead)) {
         dawnUsage |= wgpu::TextureUsage::TextureBinding;
     }
     if (usage & TextureUsage::kStorage) {
@@ -256,7 +260,18 @@ SkISize DawnCaps::getDepthAttachmentDimensions(const TextureInfo& textureInfo,
             }
 
             // Otherwise this is the Y or A plane, so no adjustment needed
-            [[fallthrough]];
+            break;
+        case wgpu::TextureFormat::R8BG8Biplanar422Unorm:
+        case wgpu::TextureFormat::R10X6BG10X6Biplanar422Unorm:
+            if (dawnInfo.fAspect == wgpu::TextureAspect::Plane1Only) {
+                return SkISize::Make(colorAttachmentDimensions.width() * 2,
+                                     colorAttachmentDimensions.height());
+            }
+            break;
+        case wgpu::TextureFormat::R8BG8Biplanar444Unorm:
+        case wgpu::TextureFormat::R10X6BG10X6Biplanar444Unorm:
+            // Both planes have the same dimensions as the full texture.
+            break;
         default:
             // Not multiplanar, so no adjustment needed
             break;
@@ -280,9 +295,8 @@ void DawnCaps::initCaps(const DawnBackendContext& backendContext, const ContextO
 
 #if defined(__EMSCRIPTEN__)
     wgpu::SupportedLimits supportedLimits;
-    // TODO(crbug.com/42241199): Update to use wgpu::Status when webgpu.h in Emscripten is updated.
-    [[maybe_unused]] bool limitsSucceeded = backendContext.fDevice.GetLimits(&supportedLimits);
-    SkASSERT(limitsSucceeded);
+    [[maybe_unused]] wgpu::Status status = backendContext.fDevice.GetLimits(&supportedLimits);
+    SkASSERT(status == wgpu::Status::Success);
     wgpu::Limits& limits = supportedLimits.limits;
 #else
     wgpu::CompatibilityModeLimits compatLimits;
@@ -337,7 +351,7 @@ void DawnCaps::initCaps(const DawnBackendContext& backendContext, const ContextO
             DawnGraphicsPipeline::kIntrinsicUniformBufferIndex;
     fResourceBindingReqs.fCombinedUniformBufferBinding =
             DawnGraphicsPipeline::kCombinedUniformIndex;
-    fResourceBindingReqs.fGradientBufferBinding = DawnGraphicsPipeline::kGradientBufferIndex;
+    fResourceBindingReqs.fStorageBufferBinding = DawnGraphicsPipeline::kStorageBufferIndex;
 
 #if !defined(__EMSCRIPTEN__)
     // We need at least 4 SSBOs for intrinsic, render step, paint & gradient buffers.
@@ -390,6 +404,11 @@ void DawnCaps::initCaps(const DawnBackendContext& backendContext, const ContextO
 
     fSupportsRenderPassRenderArea =
             backendContext.fDevice.HasFeature(wgpu::FeatureName::RenderPassRenderArea);
+
+    if (backendContext.fDevice.HasFeature(wgpu::FeatureName::DawnAllowUndefinedLoadStoreOp)) {
+        fDiscardLoadOp = wgpu::LoadOp::Undefined;
+        fDiscardStoreOp = wgpu::StoreOp::Undefined;
+    }
 #endif
 
     if (!fSupportsPartialLoadResolve &&

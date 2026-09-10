@@ -402,6 +402,7 @@ AnalyticRRectRenderStep::AnalyticRRectRenderStep(Layout layout, StaticBufferMana
                              {"mat1", VertexAttribType::kFloat3, SkSLType::kFloat3},
                              {"mat2", VertexAttribType::kFloat3, SkSLType::kFloat3}
                      }},
+                     /*storageUniforms=*/{},
                      /*varyings=*/{{
                              // TODO: If the inverse transform is part of the draw's SSBO, we can
                              // reconstruct the Jacobian in the fragment shader using the existing
@@ -457,7 +458,7 @@ AnalyticRRectRenderStep::AnalyticRRectRenderStep(Layout layout, StaticBufferMana
 
 AnalyticRRectRenderStep::~AnalyticRRectRenderStep() {}
 
-std::string AnalyticRRectRenderStep::vertexSkSL() const {
+std::string AnalyticRRectRenderStep::vertexSkSL(const RootNodesInfo&) const {
     // Returns the body of a vertex function, which must define a float4 devPosition variable and
     // must write to an already-defined float2 stepLocalCoords variable.
     return "float4 devPosition = analytic_rrect_vertex_fn("
@@ -485,6 +486,7 @@ const char* AnalyticRRectRenderStep::fragmentCoverageSkSL() const {
 }
 
 void AnalyticRRectRenderStep::writeVertices(DrawWriter* writer,
+                                            StorageContext* /*storageContext*/,
                                             const DrawParams& params,
                                             uint32_t ssboIndex) const {
     SkASSERT(params.geometry().isShape() || params.geometry().isEdgeAAQuad());

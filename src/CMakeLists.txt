@@ -49,9 +49,9 @@ else()
     set(ICU_LIBS icu)
 
     if(CMAKE_BUILD_TYPE STREQUAL "Release")
-        list(APPEND SKIA_CFLAGS "/MD")
+        string(APPEND SKIA_CFLAGS "\"/MD\"")
     else()
-        list(APPEND SKIA_CFLAGS "/MDd")
+        string(APPEND SKIA_CFLAGS "\"/MDd\"")
     endif()
 
     set(SKIA_ARGS_GN_FILE "${MD_PDF_SKIA_BUILD_PATH}/args.gn")
@@ -67,7 +67,7 @@ skia_use_system_libpng = false
 skia_use_system_libwebp = false
 skia_use_system_zlib = true
 skia_enable_tools=false
-extra_cflags = [ \"-I$<JOIN:$<TARGET_PROPERTY:ZLIB::ZLIB,INTERFACE_INCLUDE_DIRECTORIES>,\", \"-I>\", \"${SKIA_CFLAGS}\" ]
+extra_cflags = [ \"-I$<JOIN:$<TARGET_PROPERTY:ZLIB::ZLIB,INTERFACE_INCLUDE_DIRECTORIES>,\", \"-I>\", ${SKIA_CFLAGS} ]
 extra_ldflags = [ \"$<TARGET_PROPERTY:ZLIB::ZLIB,INTERFACE_LINK_DIRECTORIES>/zlib.lib\" ]
 "
     )
@@ -199,7 +199,7 @@ else()
         TARGET md-pdf-lib
         PRE_BUILD
         COMMAND ${FETCH_GN_COMMAND}
-        COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_enable_tools=false skia_use_system_expat=true skia_use_system_harfbuzz=true skia_use_system_icu=true skia_use_system_libjpeg_turbo=true skia_use_system_libpng=true skia_use_system_libwebp=true skia_use_system_zlib=true extra_cflags=[\"${SKIA_CFLAGS}\"] extra_ldflags=[\"${SKIA_LDFLAGS}\"]"
+        COMMAND "${GN_EXEC}" gen "${MD_PDF_SKIA_BUILD_PATH}" "--args=is_official_build=true skia_enable_tools=false skia_use_system_expat=true skia_use_system_harfbuzz=true skia_use_system_icu=true skia_use_system_libjpeg_turbo=true skia_use_system_libpng=true skia_use_system_libwebp=true skia_use_system_zlib=true extra_cflags=[${SKIA_CFLAGS}] extra_ldflags=[${SKIA_LDFLAGS}]"
         COMMAND ninja -C "${MD_PDF_SKIA_BUILD_PATH}" skia
         COMMAND ninja -C "${MD_PDF_SKIA_BUILD_PATH}" modules
         COMMENT "Configuring and building Skia..."
