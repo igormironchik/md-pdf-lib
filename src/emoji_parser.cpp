@@ -46,6 +46,11 @@ void EmojiItem::setEmojiName(const QString &name)
     m_emojiName = name;
 }
 
+void EmojiItem::write(QTextStream &,
+                      MD::SerialiseHelper *) const
+{
+}
+
 //
 // EmojiParser
 //

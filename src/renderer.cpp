@@ -318,14 +318,14 @@ void PdfRenderer::renderImpl()
             auto fit = this->m_doc->footnotesMap().find(ref->id());
 
             if (fit != this->m_doc->footnotesMap().cend()) {
-                auto pfit = processedFootnotes.find(fit.value().get());
+                auto pfit = processedFootnotes.find(fit.value().m_footnote.get());
 
                 if (pfit == processedFootnotes.cend()) {
-                    pfit = processedFootnotes.insert({fit.value().get(), 0}).first;
+                    pfit = processedFootnotes.insert({fit.value().m_footnote.get(), 0}).first;
 
-                    if (!fit.value()->items().isEmpty()
-                        && fit.value()->items().back()->type() == MD::ItemType::Paragraph) {
-                        auto p = static_cast<MD::Paragraph *>(fit.value()->items().back().get());
+                    if (!fit.value().m_footnote->items().isEmpty()
+                        && fit.value().m_footnote->items().back()->type() == MD::ItemType::Paragraph) {
+                        auto p = static_cast<MD::Paragraph *>(fit.value().m_footnote->items().back().get());
 
                         if (!p->isEmpty()) {
                             if (p->items().back()->type() == MD::ItemType::Text) {
@@ -342,11 +342,11 @@ void PdfRenderer::renderImpl()
                         }
                     } else {
                         auto p = QSharedPointer<MD::Paragraph>::create();
-                        fit.value()->appendItem(p);
+                        fit.value().m_footnote->appendItem(p);
                     }
                 }
 
-                auto p = static_cast<MD::Paragraph *>(fit.value()->items().back().get());
+                auto p = static_cast<MD::Paragraph *>(fit.value().m_footnote->items().back().get());
                 auto link = QSharedPointer<MD::Link>::create();
                 link->img()->setUrl(QStringLiteral(":/svg/go-jump.svgz"));
                 link->p()->appendItem(link->img());
@@ -2379,7 +2379,7 @@ PdfRenderer::drawParagraph(PdfAuxData &pdfData,
             const auto fit = doc->footnotesMap().find(ref->id());
 
             if (fit != doc->footnotesMap().cend()) {
-                auto anchorIt = pdfData.m_footnotesAnchorsMap.constFind(fit.value().get());
+                auto anchorIt = pdfData.m_footnotesAnchorsMap.constFind(fit.value().m_footnote.get());
 
                 if (anchorIt != pdfData.m_footnotesAnchorsMap.cend()) {
                     nextFootnoteNum = anchorIt->second;
@@ -2534,10 +2534,10 @@ PdfRenderer::drawParagraph(PdfAuxData &pdfData,
             const auto fit = doc->footnotesMap().find(ref->id());
 
             if (fit != doc->footnotesMap().cend()) {
-                auto anchorIt = pdfData.m_footnotesAnchorsMap.constFind(fit.value().get());
+                auto anchorIt = pdfData.m_footnotesAnchorsMap.constFind(fit.value().m_footnote.get());
 
                 if (anchorIt == pdfData.m_footnotesAnchorsMap.cend()) {
-                    pdfData.m_footnotesAnchorsMap.insert(fit.value().get(),
+                    pdfData.m_footnotesAnchorsMap.insert(fit.value().m_footnote.get(),
                                                          {pdfData.m_currentFile, pdfData.m_footnoteNum++});
                 }
             } else {
@@ -2657,7 +2657,7 @@ PdfRenderer::drawParagraph(PdfAuxData &pdfData,
             const auto fit = doc->footnotesMap().find(ref->id());
 
             if (fit != doc->footnotesMap().cend()) {
-                auto anchorIt = pdfData.m_footnotesAnchorsMap.constFind(fit.value().get());
+                auto anchorIt = pdfData.m_footnotesAnchorsMap.constFind(fit.value().m_footnote.get());
 
                 if (anchorIt != pdfData.m_footnotesAnchorsMap.cend()) {
                     nextFootnoteNum = anchorIt->second;
@@ -2831,19 +2831,19 @@ PdfRenderer::drawParagraph(PdfAuxData &pdfData,
             const auto fit = doc->footnotesMap().find(ref->id());
 
             if (fit != doc->footnotesMap().cend()) {
-                auto anchorIt = pdfData.m_footnotesAnchorsMap.constFind(fit.value().get());
+                auto anchorIt = pdfData.m_footnotesAnchorsMap.constFind(fit.value().m_footnote.get());
                 int num = pdfData.m_footnoteNum;
 
                 if (anchorIt != pdfData.m_footnotesAnchorsMap.cend()) {
                     num = anchorIt->second;
                 }
 
-                auto fcit = pdfData.m_footnoteRefCount.find(fit.value().get());
+                auto fcit = pdfData.m_footnoteRefCount.find(fit.value().m_footnote.get());
 
                 if (fcit != pdfData.m_footnoteRefCount.end()) {
                     ++fcit.value();
                 } else {
-                    fcit = pdfData.m_footnoteRefCount.insert(fit.value().get(), 1);
+                    fcit = pdfData.m_footnoteRefCount.insert(fit.value().m_footnote.get(), 1);
                 }
 
                 const auto str = createUtf8String(QString::number(num));
@@ -2881,7 +2881,7 @@ PdfRenderer::drawParagraph(PdfAuxData &pdfData,
 
                 pdfData.m_layout.addX(w);
 
-                addFootnote(ref->id(), fit.value(), pdfData, doc);
+                addFootnote(ref->id(), fit.value().m_footnote, pdfData, doc);
             } else {
                 auto text = static_cast<MD::Text *>(it->get());
 
@@ -5192,7 +5192,7 @@ void PdfRenderer::addFootnote(const QString &refId,
                     const auto fit = doc->footnotesMap().find(ref->id());
 
                     if (fit != doc->footnotesMap().cend()) {
-                        this->addFootnote(ref->id(), fit.value(), pdfData, doc);
+                        this->addFootnote(ref->id(), fit.value().m_footnote, pdfData, doc);
                     }
                 } break;
 

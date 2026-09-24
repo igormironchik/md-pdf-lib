@@ -41,6 +41,9 @@ public:
      */
     void setEmojiName(const QString &name);
 
+    void write(QTextStream &,
+               MD::SerialiseHelper *) const override;
+
 private:
     QString m_emojiName;
 }; // class EmojiItem
