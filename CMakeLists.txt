@@ -3,7 +3,9 @@
 
 cmake_minimum_required(VERSION 3.19)
 
-project(md-pdf-lib)
+project(md-pdf-lib VERSION "1.0.0")
+
+set(MD_PDF_LIB_VERSION ${PROJECT_VERSION} PARENT_SCOPE)
 
 option(BUILD_MD_TESTS "Build tests? Default OFF." OFF)
 option(BUILD_TEST_LIBRARY "Build test library? Default OFF." OFF)
