@@ -99,8 +99,7 @@ target_link_libraries(md-pdf-lib
     ZLIB::ZLIB)
 
 target_include_directories(md-pdf-lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/Skia
-    ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty
-    ${CMAKE_CURRENT_SOURCE_DIR})
+    ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty)
 
 if(BUILD_TEST_LIBRARY)
     find_package(Qt6 REQUIRED COMPONENTS Test)
@@ -150,8 +149,7 @@ if(BUILD_TEST_LIBRARY)
         ZLIB::ZLIB)
 
     target_include_directories(md-pdf-lib-test PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/Skia
-        ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty
-        ${CMAKE_CURRENT_SOURCE_DIR})
+        ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty)
 
     add_dependencies(md-pdf-lib-test md-pdf-lib)
 endif()
