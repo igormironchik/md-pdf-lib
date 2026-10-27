@@ -18,13 +18,13 @@
 #include "src/gpu/SkBackingFit.h"
 #include "src/gpu/graphite/Caps.h"
 #include "src/gpu/graphite/Device.h"
-#include "src/gpu/graphite/DrawContext.h"
 #include "src/gpu/graphite/RecorderPriv.h"
 #include "src/gpu/graphite/ResourceProvider.h"
 #include "src/gpu/graphite/Texture.h"
 #include "src/gpu/graphite/TextureFormat.h"
 #include "src/gpu/graphite/TextureInfoPriv.h"
 #include "src/gpu/graphite/TextureUtils.h"
+#include "src/gpu/graphite/draw/DrawContext.h"
 #include "src/gpu/graphite/task/CopyTask.h"
 
 #if defined(GPU_TEST_UTILS)
@@ -121,10 +121,14 @@ sk_sp<Image> Image::Copy(Recorder* recorder,
             recorder->priv().resourceProvider(),
             backingFit == SkBackingFit::kApprox ? GetApproxSize(subset.size()) : subset.size(),
             textureInfo,
-            label,
-            budgeted);
+            budgeted,
+            label);
     if (!dst) {
         return nullptr;
+    }
+    if (srcView.proxy()) {
+        dst->setProvenance(SkPixelStorage::Provenance::Copy(
+                srcView.proxy()->getPixelStorageId(), srcView.proxy()->getContentId()));
     }
 
     auto copyTask = CopyTextureToTextureTask::Make(srcView.refProxy(), subset, dst, {0, 0});

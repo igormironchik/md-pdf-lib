@@ -11,7 +11,13 @@
 #include "include/core/SkRefCnt.h"
 #include "include/private/SkAPI.h"
 
+#include <memory>
+
+class SkCapture;
+class SkCaptureManager;
 class SkContextPriv;
+class SkContextPrivConst;
+class SkGPUContext;
 class SkResourceCache;
 class SkSharedContext;
 class SkStrikeCache;
@@ -34,13 +40,28 @@ public:
     ~SkContext();
 
     SkContextPriv priv();
-    const SkContextPriv priv() const;
+    SkContextPrivConst priv() const;
+
+    /*
+     * Starts the SkCapture. Must have set SkContextOptions::fEnableCapture to start.
+     */
+    void startCapture();
+
+    /*
+     * Ends the SkCapture and returns the collected draws and surface creation.
+     */
+    sk_sp<SkCapture> endCapture();
 
 private:
-    SkContext(sk_sp<SkSharedContext>);
+    SkContext(const SkContextOptions&);
+    SkContext(const SkContextOptions&, std::unique_ptr<SkGPUContext> gpuContext);
+
+    friend class SkContextPrivConst;
+    friend class SkContextPriv;
+    friend class SkContextCtorAccessor;
 
     SkResourceCache* resourceCache() const;
-    SkStrikeCache* fontCache() const;
+    SkStrikeCache* strikeCache() const;
     SkTypefaceCache* typefaceCache() const;
 
     size_t fontCacheLimit() const;
@@ -56,7 +77,10 @@ private:
 
     void dumpMemoryStatistics(SkTraceMemoryDump* dump);
 
+    sk_sp<SkCaptureManager> fCaptureManager;
     sk_sp<SkSharedContext> fSharedContext;
+
+    std::unique_ptr<SkGPUContext> fGPUContext;
 };
 
 #endif  // SkContext_DEFINED

@@ -59,15 +59,17 @@ void GrOpFlushState::executeDrawsAndUploadsForMeshDrawOp(
                fCurrUpload->fUploadBeforeToken == drawToken) {
             if (!this->opsRenderPass()->inlineUpload(this, fCurrUpload->fUpload)) {
                 drawUploadFailure = true;
+                fDeferredUploadFailed = true;
             }
             // Attempt subsequent uploads even if one fails (future draws may depend upon them).
             ++fCurrUpload;
         }
 
         // If not all of the uploads succeeded, do not attempt to execute the draw and relevant
-        // preparations. Continue on to the next draw operation (which may also fail if subsequent
-        // draw calls depended upon these uploads, but we cannot know that at this point).
-        if (drawUploadFailure) {
+        // preparations. Continue on to the next draw operation.
+        // fDeferredUploadFailed covers ASAP and inline upload failures: draws in such a flush
+        // may sample texture regions that were never written, so they are skipped.
+        if (drawUploadFailure || fDeferredUploadFailed) {
             fGpu->stats()->incNumFailedDraws();
         } else {
             GrProgramInfo programInfo(this->caps(),
@@ -97,18 +99,27 @@ bool GrOpFlushState::preExecuteDraws() {
     if (!fVertexPool.unmap() ||
         !fIndexPool.unmap() ||
         !fDrawIndirectPool.unmap()) {
-        fCurrDraw = fDraws.end();
-        fCurrUpload = fInlineUploads.end();
+        this->abort();
         return false;
     }
     for (auto& upload : fASAPUploads) {
-        this->doUpload(upload);
+        if (!this->doUpload(upload)) {
+            fDeferredUploadFailed = true;
+        }
     }
     // Setup execution iterators.
     fCurrDraw = fDraws.begin();
     fCurrUpload = fInlineUploads.begin();
     fGpu->willExecute();
     return true;
+}
+
+void GrOpFlushState::abort() {
+    fCurrDraw = fDraws.end();
+    fCurrUpload = fInlineUploads.end();
+    if (fTokenTracker) {
+        fTokenTracker->catchUpFlushToken();
+    }
 }
 
 void GrOpFlushState::reset() {
@@ -122,9 +133,10 @@ void GrOpFlushState::reset() {
     fInlineUploads.reset();
     fDraws.reset();
     fBaseDrawToken = skgpu::Token::InvalidToken();
+    fDeferredUploadFailed = false;
 }
 
-void GrOpFlushState::doUpload(GrDeferredTextureUploadFn& upload,
+bool GrOpFlushState::doUpload(GrDeferredTextureUploadFn& upload,
                               bool shouldPrepareSurfaceForSampling) {
     GrDeferredTextureUploadWritePixelsFn wp = [this, shouldPrepareSurfaceForSampling](
                                                       GrTextureProxy* dstProxy,
@@ -132,8 +144,11 @@ void GrOpFlushState::doUpload(GrDeferredTextureUploadFn& upload,
                                                       GrColorType colorType,
                                                       const void* buffer,
                                                       size_t rowBytes) {
+        if (!dstProxy) {
+            return false;
+        }
         GrSurface* dstSurface = dstProxy->peekSurface();
-        if (!fGpu->caps()->surfaceSupportsWritePixels(dstSurface)) {
+        if (!dstSurface || !fGpu->caps()->surfaceSupportsWritePixels(dstSurface)) {
             return false;
         }
         GrCaps::SupportedWrite supportedWrite = fGpu->caps()->supportedWritePixelsColorType(
@@ -163,7 +178,7 @@ void GrOpFlushState::doUpload(GrDeferredTextureUploadFn& upload,
                                        rowBytes,
                                        shouldPrepareSurfaceForSampling);
     };
-    upload(wp);
+    return upload(wp);
 }
 
 skgpu::Token GrOpFlushState::addInlineUpload(GrDeferredTextureUploadFn&& upload) {

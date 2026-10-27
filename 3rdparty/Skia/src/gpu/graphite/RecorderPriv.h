@@ -12,6 +12,7 @@
 #include "include/core/SkRefCnt.h"
 #include "include/gpu/graphite/Recorder.h"
 #include "include/private/SkDebug.h"
+#include "include/private/SkOnlyStackAllocatable.h"
 #include "src/gpu/graphite/DebugUtils.h"
 #include "src/gpu/graphite/PipelineData.h"
 #include "src/gpu/graphite/ResourceProvider.h"
@@ -41,6 +42,7 @@ class Caps;
 class Context;
 class Device;
 class DrawBufferManager;
+class DrawContext;
 class ProxyCache;
 class RendererProvider;
 class ResourceCache;
@@ -53,6 +55,8 @@ class UploadList;
 
 class RecorderPriv {
 public:
+    SK_ONLY_STACK_ALLOCATABLE;
+
     void add(sk_sp<Task>);
     // Flush *all* tracked devices created by this Recorder
     void flushTrackedDevices(SK_DUMP_TASKS_CODE(const char* flushSource));
@@ -87,7 +91,9 @@ public:
     DrawBufferManager* drawBufferManager() { return fRecorder->fDrawBufferManager.get(); }
     UploadBufferManager* uploadBufferManager() { return fRecorder->fUploadBufferManager.get(); }
 
-    AtlasProvider* atlasProvider() { return fRecorder->fAtlasProvider.get(); }
+    AtlasProvider* getOrCreateAtlasProvider();
+    void recordAtlasProviderUploads(DrawContext*);
+    void compactAtlasProvider();
     TokenTracker* tokenTracker() { return fRecorder->fTokenTracker.get(); }
     sktext::gpu::StrikeCache* strikeCache() { return fRecorder->fStrikeCache.get(); }
     sktext::gpu::TextBlobRedrawCoordinator* textBlobCache() {

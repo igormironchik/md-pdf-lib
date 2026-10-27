@@ -20,6 +20,7 @@
 #include "src/gpu/ganesh/GrOnFlushResourceProvider.h"
 #include "src/gpu/ganesh/GrProxyProvider.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -127,6 +128,10 @@ public:
         }
     }
 
+    void onFlushFailed() override {
+        this->freeAll();
+    }
+
     // The AtlasGlyph cache always survives freeGpuResources so we want it to remain in the active
     // OnFlushCallbackObject list
     bool retainOnFreeGpuResources() override { return true; }
@@ -174,7 +179,7 @@ private:
     }
 
     GrDrawOpAtlas::AllowMultitexturing fAllowMultitexturing;
-    std::unique_ptr<GrDrawOpAtlas> fAtlases[skgpu::kMaskFormatCount];
+    std::array<std::unique_ptr<GrDrawOpAtlas>, skgpu::kMaskFormatCount> fAtlases;
     static_assert(skgpu::kMaskFormatCount == 3);
     bool fSupportBilerpAtlas;
     GrProxyProvider* fProxyProvider;

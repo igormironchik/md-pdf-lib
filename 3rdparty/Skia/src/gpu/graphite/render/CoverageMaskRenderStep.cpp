@@ -20,12 +20,12 @@
 #include "src/gpu/BufferWriter.h"
 #include "src/gpu/graphite/Attribute.h"
 #include "src/gpu/graphite/ContextUtils.h"
-#include "src/gpu/graphite/DrawOrder.h"
-#include "src/gpu/graphite/DrawParams.h"
 #include "src/gpu/graphite/DrawTypes.h"
-#include "src/gpu/graphite/DrawWriter.h"
 #include "src/gpu/graphite/PipelineData.h"
 #include "src/gpu/graphite/TextureProxy.h"
+#include "src/gpu/graphite/draw/DrawOrder.h"
+#include "src/gpu/graphite/draw/DrawParams.h"
+#include "src/gpu/graphite/draw/DrawWriter.h"
 #include "src/gpu/graphite/geom/CoverageMaskShape.h"
 #include "src/gpu/graphite/geom/Geometry.h"
 #include "src/gpu/graphite/geom/Rect.h"
@@ -61,15 +61,15 @@ CoverageMaskRenderStep::CoverageMaskRenderStep(Layout layout)
                      RenderStepID::kCoverageMask,
                      // The mask will have AA outsets baked in, but the original bounds for clipping
                      // still require the outset for analytic coverage.
-                     Flags::kPerformsShading |
-                     Flags::kHasTextures |
-                     Flags::kEmitsCoverage |
-                     Flags::kOutsetBoundsForAA |
-                     Flags::kInverseFillsScissor |
-                     Flags::kAppendInstances,
+                     Flags::kPerformsShading | Flags::kHasTextures
+                                             | Flags::kEmitsCoverage
+                                             | Flags::kOutsetBoundsForAA
+                                             | Flags::kInverseFillsScissor
+                                             | Flags::kNoSelfIntersections
+                                             | Flags::kAppendInstances,
                      /*uniforms=*/{{"maskToDeviceRemainder", SkSLType::kFloat3x3}},
                      PrimitiveType::kTriangleStrip,
-                     kDirectDepthLessPass,
+                     /*stencilSettings=*/{},
                      /*staticAttrs=*/ {},
                      /*appendAttrs=*/
                      // Draw bounds and mask bounds are in normalized relative to the mask texture,

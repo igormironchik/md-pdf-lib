@@ -19,6 +19,7 @@
 #include "src/gpu/Swizzle.h"
 #include "src/gpu/graphite/ResourceTypes.h"
 #include "src/gpu/graphite/TextureFormat.h"
+#include "src/partition_alloc/raw_ptr.h"
 #include "src/text/gpu/SubRunControl.h"
 
 #include <cstddef>
@@ -88,9 +89,14 @@ struct ResourceBindingRequirements {
     int fIntrinsicBufferBinding       = kUnassigned;
     int fCombinedUniformBufferBinding = kUnassigned;
     int fStorageBufferBinding         = kUnassigned;
-    /* Maximum texture atlas dimension for StorageBuffer fallback texture, defaults to 8192 */
-    int fMaxFallbackTextureSize       = kUnassigned;
-    int fMaxFallbackTextureBytes      = kUnassigned;
+    /* Maximum texture atlas dimension for StorageBuffer fallback texture, defaults to 2048 */
+    static constexpr int kDefaultMaxFallbackTextureSize = 2048;
+    // 128 MB is the minimum guaranteed storage buffer binding range across WebGPU/Dawn
+    // (maxStorageBufferBindingSize) and Vulkan (maxStorageBufferRange).
+    static constexpr int kDefaultMaxStorageBufferBytes  = 128 * 1024 * 1024;
+    int fMaxFallbackTextureSize                         = kUnassigned;
+    int fMaxFallbackTextureBytes                        = kUnassigned;
+    int fMaxStorageBufferBytes                          = kDefaultMaxStorageBufferBytes;
 };
 
 class Caps {
@@ -133,17 +139,33 @@ public:
     /* Returns whether multisampled render to single sampled is supported. */
     bool msaaRenderToSingleSampledSupport() const { return fMSAARenderToSingleSampledSupport; }
 
+    // Sizing requirements for auxiliary attachments in a renderpass, such as the depth/stencil
+    // or color MSAA attachment.
+    enum class AttachmentSizePolicy : uint8_t {
+        kExact, // Auxiliary attachments must have the exact same size as the main texture
+        kApprox, // Auxiliary attachments can be made larger via GetApproxSize()
+        kMSAARenderArea, // MSAA-only attachments can be made smaller to fit the render bounds
+    };
+
     /**
-     * Returns whether a render pass can have MSAA/depth/stencil attachments and a resolve
-     * attachment with mismatched sizes. Note: the MSAA attachment and the depth/stencil attachment
-     * still need to match their sizes.
-     * This also implies supporting partial load/resolve.
+     * Returns whether a render pass's MSAA/depth/stencil attachments can have a different size
+     * than the resolve attachment (or the single-sampled color attachment when there is no
+     * MSAA involved).
+     *
+     * The MSAA attachment and the depth/stencil attachment must still match each other's size.
+     * If partial load/resolve is not supported, all attachments (including the resolve attachment)
+     * must still be larger than the framebuffer size.
      */
-    bool differentResolveAttachmentSizeSupport() const {
-        return fDifferentResolveAttachmentSizeSupport;
+    AttachmentSizePolicy attachmentSizePolicy() const {
+        return fAttachmentSizePolicy;
     }
 
-    /* Get required depth attachment dimensions for a givin color attachment info and dimensions. */
+    /**
+     * Get required depth attachment dimensions for a given color attachment info and dimensions.
+     * This assumes `colorAttachmentDimensions` has already been adjusted for attachmentSizePolicy()
+     * and this function's primary purpose is to handle complex requirements when rendering into
+     * multiplanar texture views.
+     */
     virtual SkISize getDepthAttachmentDimensions(const TextureInfo&,
                                                  const SkISize colorAttachmentDimensions) const {
         return colorAttachmentDimensions;
@@ -299,8 +321,13 @@ public:
                  fResourceBindingReqs.fStorageBufferLayout == Layout::kStd430 ||
                  fResourceBindingReqs.fStorageBufferLayout == Layout::kStd430_F16 ||
                  fResourceBindingReqs.fStorageBufferLayout == Layout::kMetal);
+        SkASSERT(fStorageBufferSupport ||
+                 fResourceBindingReqs.fBackendApi != BackendApi::kMetal);
         return fStorageBufferSupport;
     }
+
+    /* Returns whether storage buffers are supported for compute dispatches. */
+    bool storageBufferSupportForCompute() const { return fStorageBufferSupportForCompute; }
 
     /* Returns whether a draw buffer can be mapped. */
     bool drawBufferCanBeMapped() const { return fDrawBufferCanBeMapped; }
@@ -462,12 +489,12 @@ protected:
     bool fDrawBufferCanBeMapped = true;
     bool fBufferMapsAreAsync = false;
     bool fMSAARenderToSingleSampledSupport = false;
-    bool fDifferentResolveAttachmentSizeSupport = false;
     bool fAvoidMSAA = false;
     bool fDrawListLayer = false;
     bool fAvoidDepthMode = false;
 
     bool fComputeSupport = false;
+    bool fStorageBufferSupportForCompute = false;
     bool fSupportsAHardwareBufferImages = false;
     bool fFullCompressedUploadSizeMustAlignToBlockDims = false;
 
@@ -490,6 +517,7 @@ protected:
 
     ResourceBindingRequirements fResourceBindingReqs;
     BlendEquationSupport fBlendEqSupport = BlendEquationSupport::kBasic;
+    AttachmentSizePolicy fAttachmentSizePolicy = AttachmentSizePolicy::kExact;
 
     GpuStatsFlags fSupportedGpuStats = GpuStatsFlags::kNone;
 
@@ -500,7 +528,7 @@ protected:
      * If present, use this object to report shader compilation failures. If not, report failures
      * via SkDebugf and assert.
      */
-    ShaderErrorHandler* fShaderErrorHandler = nullptr;
+    raw_ptr<ShaderErrorHandler> fShaderErrorHandler = nullptr;
 
 #if defined(GPU_TEST_UTILS)
     std::string fDeviceName;

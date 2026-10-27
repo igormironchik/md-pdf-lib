@@ -10,11 +10,13 @@
 #include "include/core/SkSpan.h"
 #include "include/core/SkTypes.h"
 #include "include/private/SkEnumBitMask.h"
+#include "include/private/SkOnlyStackAllocatable.h"
 #include "include/private/SkTArray.h"
 #include "include/private/SkTo.h"
 #include "src/core/SkStringView.h"
 #include "src/core/SkTHash.h"
 #include "src/core/SkTraceEvent.h"
+#include "src/partition_alloc/raw_ptr.h"
 #include "src/sksl/SkSLAnalysis.h"
 #include "src/sksl/SkSLBuiltinTypes.h"
 #include "src/sksl/SkSLCompiler.h"
@@ -82,6 +84,7 @@
 #include "src/sksl/transform/SkSLTransform.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -137,6 +140,11 @@ public:
         kGlobalInvocationId,    // input
         kWorkgroupId,           // input
         kNumWorkgroups,         // input
+
+        // Compute stage, requires `enable subgroups;`:
+        kSubgroupSize,          // input
+        kSubgroupId,            // input
+        kSubgroupInvocationId,  // input
     };
 
     // Variable declarations can be terminated by:
@@ -426,7 +434,7 @@ private:
     // of matrices combine both wrappers. These wrapper structs are unpacked into natively-typed
     // globals at the shader entrypoint.
     struct FieldPolyfillInfo {
-        const InterfaceBlock* fInterfaceBlock;
+        raw_ptr<const InterfaceBlock> fInterfaceBlock;
         std::string fReplacementName;
         bool fIsArray = false;
         bool fIsMatrix = false;
@@ -901,6 +909,12 @@ std::string_view wgsl_builtin_name(WGSLCodeGenerator::Builtin builtin) {
             return "@builtin(workgroup_id)";
         case Builtin::kNumWorkgroups:
             return "@builtin(num_workgroups)";
+        case Builtin::kSubgroupSize:
+            return "@builtin(subgroup_size)";
+        case Builtin::kSubgroupId:
+            return "@builtin(subgroup_id)";
+        case Builtin::kSubgroupInvocationId:
+            return "@builtin(subgroup_invocation_id)";
         default:
             break;
     }
@@ -942,6 +956,10 @@ std::string_view wgsl_builtin_type(WGSLCodeGenerator::Builtin builtin, const Con
             return "vec3<u32>";
         case Builtin::kNumWorkgroups:
             return "vec3<u32>";
+        case Builtin::kSubgroupSize:
+        case Builtin::kSubgroupId:
+        case Builtin::kSubgroupInvocationId:
+            return "u32";
         default:
             break;
     }
@@ -1002,6 +1020,12 @@ std::optional<WGSLCodeGenerator::Builtin> builtin_from_sksl_name(int builtin) {
             return Builtin::kGlobalInvocationId;
         case SK_LOCALINVOCATIONINDEX_BUILTIN:
             return Builtin::kLocalInvocationIndex;
+        case SK_SUBGROUPSIZE_BUILTIN:
+            return Builtin::kSubgroupSize;
+        case SK_SUBGROUPID_BUILTIN:
+            return Builtin::kSubgroupId;
+        case SK_SUBGROUPINVOCATIONID_BUILTIN:
+            return Builtin::kSubgroupInvocationId;
         default:
             break;
     }
@@ -1259,7 +1283,7 @@ public:
 
         // First, see which components are used.
         // The assignment swizzle must not reuse components.
-        bool used[4] = {};
+        std::array<bool, 4> used = {};
         for (int8_t component : fComponents) {
             SkASSERT(!used[component]);
             used[component] = true;
@@ -1367,6 +1391,8 @@ private:
 
 class WGSLCodeGenerator::AutoConstEvalWorkaround {
 public:
+    SK_ONLY_STACK_ALLOCATABLE;
+
     AutoConstEvalWorkaround(WGSLCodeGenerator* generator, const Expression& parent)
             : fGenerator(generator)
             , fOriginalValue(generator->fNeedsConstEvalWorkaround) {
@@ -1482,8 +1508,10 @@ void WGSLCodeGenerator::writeUniformPolyfills() {
               });
 
     THashSet<const Type*> writtenArrayElementPolyfill;
-    bool writtenUniformMatrixPolyfill[2][5][5] = {};  // {h,f} x m[column][row] for each matrix type
-    bool writtenUniformRowPolyfill[2][5] = {};        // {h,f} x for each matrix row-size
+    // {h,f} x m[column][row] for each matrix type
+    std::array<std::array<std::array<bool, 5>, 5>, 2> writtenUniformMatrixPolyfill = {};
+    // {h,f} x for each matrix row-size
+    std::array<std::array<bool, 5>, 2> writtenUniformRowPolyfill = {};
     bool anyFieldAccessed = false;
     for (const FieldPolyfillMap::Pair* pair : orderedFields) {
         const auto& [field, info] = *pair;
@@ -4174,6 +4202,11 @@ std::string WGSLCodeGenerator::assembleVariableReference(const VariableReference
     // TODO(b/294274678): Correctly handle RTFlip for built-ins.
     const Variable& v = *r.variable();
 
+    if (IsSubgroupBuiltin(v.layout().fBuiltin) && !fCaps.fSubgroupSupport) {
+        fContext.fErrors->error(r.position(), "'" + std::string(v.name()) + "' not supported");
+        return {};
+    }
+
     // Insert a conversion expression if this is a built-in variable whose type differs from the
     // SkSL.
     std::string expr;
@@ -4676,6 +4709,11 @@ void WGSLCodeGenerator::writeEnables() {
     if (fProgram.fInterface.fOutputSecondaryColor) {
         this->writeLine("enable dual_source_blending;");
     }
+    if (fProgram.fInterface.fUseSubgroups) {
+        // `subgroup_id` additionally needs the `subgroup_id` language feature. Language features
+        // need no directive; DawnCaps only reports subgroup support when it is available.
+        this->writeLine("enable subgroups;");
+    }
 }
 
 bool WGSLCodeGenerator::needsStageInputStruct() const {
@@ -5004,7 +5042,7 @@ bool ToWGSL(Program& program,
         if (result) {
             std::string_view wgslBytes = wgsl.str();
             std::string warnings;
-            result = validateWGSL(*program.fContext->fErrors, wgslBytes, &warnings);
+            result = validateWGSL(*program.fContext->fErrors, *caps, wgslBytes, &warnings);
             if (!warnings.empty()) {
                 out.writeText("/* Tint reported warnings. */\n\n");
             }

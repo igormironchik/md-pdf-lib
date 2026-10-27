@@ -19,6 +19,11 @@ static bool is_plane_config_compatible_with_subsampling(SkYUVAInfo::PlaneConfig 
         subsampling == SkYUVAInfo::Subsampling::kUnknown) {
         return false;
     }
+#if defined(SK_ENABLE_YUVA_PACKED_422)
+    if (config == SkYUVAInfo::PlaneConfig::kYUYV) {
+        return subsampling == SkYUVAInfo::Subsampling::k422;
+    }
+#endif
     return subsampling == SkYUVAInfo::Subsampling::k444 ||
            (config != SkYUVAInfo::PlaneConfig::kYUV  &&
             config != SkYUVAInfo::PlaneConfig::kYUVA &&
@@ -44,7 +49,7 @@ std::tuple<int, int> SkYUVAInfo::PlaneSubsamplingFactors(PlaneConfig planeConfig
                                                          int planeIdx) {
     if (!is_plane_config_compatible_with_subsampling(planeConfig, subsampling) ||
         planeIdx < 0                                                           ||
-        planeIdx > NumPlanes(planeConfig)) {
+        planeIdx >= NumPlanes(planeConfig)) {
         return {0, 0};
     }
     bool isSubsampledPlane = false;
@@ -70,6 +75,13 @@ std::tuple<int, int> SkYUVAInfo::PlaneSubsamplingFactors(PlaneConfig planeConfig
         case PlaneConfig::kYUVA:
         case PlaneConfig::kUYVA:
             break;
+#if defined(SK_ENABLE_YUVA_PACKED_422)
+        case PlaneConfig::kYUYV:
+            // One texel holds the pixel pair, so the plane is horizontally subsampled even though
+            // it carries chroma in every texel.
+            isSubsampledPlane = true;
+            break;
+#endif
     }
     return isSubsampledPlane ? SubsamplingFactors(subsampling) : std::make_tuple(1, 1);
 }
@@ -137,6 +149,13 @@ int SkYUVAInfo::PlaneDimensions(SkISize imageDimensions,
             planeDimensions[0] = {w, h};
             SkASSERT(planeDimensions[0] == uvSize);
             return 1;
+
+#if defined(SK_ENABLE_YUVA_PACKED_422)
+        case PlaneConfig::kYUYV:
+            planeDimensions[0] = {down2(w), h};
+            SkASSERT(w % 2 == 0);
+            return 1;
+#endif
     }
     SkUNREACHABLE;
 }
@@ -259,6 +278,17 @@ SkYUVAInfo::YUVALocations SkYUVAInfo::GetYUVALocations(PlaneConfig config,
             planesAndIndices = kPlanesAndIndices;
             break;
         }
+#if defined(SK_ENABLE_YUVA_PACKED_422)
+        case PlaneConfig::kYUYV: {
+            // Even pixels take (Y0, U, V) from channels 0, 1 and 3 and odd pixels take (Y1, U, V)
+            // from channels 2, 1 and 3 of the pair's 4-channel texel; the locations record the
+            // even-pixel channels (see kYUYV docs) and the sampling code swaps in the odd-pixel
+            // luma channel.
+            static constexpr PlaneAndIndex kPlanesAndIndices[] = {{0, 0}, {0, 1}, {0, 3}, {-1, -1}};
+            planesAndIndices = kPlanesAndIndices;
+            break;
+        }
+#endif
     }
     SkASSERT(planesAndIndices);
     YUVALocations yuvaLocations;
@@ -295,6 +325,9 @@ bool SkYUVAInfo::HasAlpha(PlaneConfig planeConfig) {
         case PlaneConfig::kY_VU_A:  return true;
         case PlaneConfig::kYUVA:    return true;
         case PlaneConfig::kUYVA:    return true;
+#if defined(SK_ENABLE_YUVA_PACKED_422)
+        case PlaneConfig::kYUYV:    return false;
+#endif
     }
     SkUNREACHABLE;
 }
@@ -319,6 +352,17 @@ SkYUVAInfo::SkYUVAInfo(SkISize dimensions,
         SkASSERT(!this->isValid());
         return;
     }
+#if defined(SK_ENABLE_YUVA_PACKED_422)
+    if (planeConfig == PlaneConfig::kYUYV) {
+        int memoryWidth = SkEncodedOriginSwapsWidthHeight(origin) ? fDimensions.height()
+                                                                  : fDimensions.width();
+        if (memoryWidth % 2 != 0) {
+            *this = {};
+            SkASSERT(!this->isValid());
+            return;
+        }
+    }
+#endif
     SkASSERT(this->isValid());
 }
 

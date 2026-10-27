@@ -14,6 +14,7 @@
 #include "include/core/SkPoint.h"
 #include "include/core/SkStrokeRec.h"
 #include "include/private/SkAssert.h"
+#include "include/private/SkOnlyStackAllocatable.h"
 #include "src/core/SkPathPriv.h"
 
 #include <array>
@@ -38,6 +39,8 @@ namespace skgpu::tess {
 //
 class StrokeIterator {
 public:
+    SK_ONLY_STACK_ALLOCATABLE;
+
     StrokeIterator(const SkPath& path, const SkStrokeRec* stroke, const SkMatrix* viewMatrix)
             : fViewMatrix(viewMatrix), fStroke(stroke) {
         SkPathPriv::Iterate it(path);
@@ -360,9 +363,9 @@ private:
     const SkPoint* fLastDegenerateStrokePt = nullptr;
 
     // The queue is implemented as a roll-over array with a floating front index.
-    Verb fVerbs[kQueueBufferCount];
-    const SkPoint* fPts[kQueueBufferCount];
-    const float* fW[kQueueBufferCount];
+    std::array<Verb, kQueueBufferCount> fVerbs;
+    std::array<const SkPoint*, kQueueBufferCount> fPts;
+    std::array<const float*, kQueueBufferCount> fW;
     int fQueueFrontIdx = 0;
     int fQueueCount = 0;
 

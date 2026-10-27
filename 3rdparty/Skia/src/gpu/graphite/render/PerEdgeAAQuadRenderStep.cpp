@@ -17,11 +17,11 @@
 #include "src/gpu/BufferWriter.h"
 #include "src/gpu/graphite/Attribute.h"
 #include "src/gpu/graphite/BufferManager.h"
-#include "src/gpu/graphite/DrawOrder.h"
-#include "src/gpu/graphite/DrawParams.h"
 #include "src/gpu/graphite/DrawTypes.h"
-#include "src/gpu/graphite/DrawWriter.h"
 #include "src/gpu/graphite/PipelineData.h"
+#include "src/gpu/graphite/draw/DrawOrder.h"
+#include "src/gpu/graphite/draw/DrawParams.h"
+#include "src/gpu/graphite/draw/DrawWriter.h"
 #include "src/gpu/graphite/geom/EdgeAAQuad.h"
 #include "src/gpu/graphite/geom/Geometry.h"
 #include "src/gpu/graphite/geom/Rect.h"
@@ -198,11 +198,14 @@ static void write_vertex_buffer(VertexWriter writer) {
 PerEdgeAAQuadRenderStep::PerEdgeAAQuadRenderStep(Layout layout, StaticBufferManager* bufferManager)
         : RenderStep(layout,
                      RenderStepID::kPerEdgeAAQuad,
-                     Flags::kPerformsShading | Flags::kEmitsCoverage | Flags::kOutsetBoundsForAA |
-                     Flags::kUseNonAAInnerFill | Flags::kAppendInstances,
+                     Flags::kPerformsShading | Flags::kEmitsCoverage
+                                             | Flags::kOutsetBoundsForAA
+                                             | Flags::kUseNonAAInnerFill
+                                             | Flags::kNoSelfIntersections
+                                             | Flags::kAppendInstances,
                      /*uniforms=*/{},
                      PrimitiveType::kTriangleStrip,
-                     kDirectDepthLessPass,
+                     /*stencilSettings=*/{},
                      /*staticAttrs=*/{{
                              {"cornerID", VertexAttribType::kUInt, SkSLType::kUInt },
                              {"normal", VertexAttribType::kFloat2, SkSLType::kFloat2},

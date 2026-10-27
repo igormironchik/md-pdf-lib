@@ -2,6 +2,37 @@ Skia Graphics Release Notes
 
 This file includes a list of high level updates for each milestone release.
 
+Milestone 157
+-------------
+  * Graphite now requires >= iOS 14.0. This was the first iOS version in which some required C++20 features were added.
+  * SkYUVAInfo::PlaneConfig gains kYUYV, a packed 4:2:2 single-plane YUV config whose plane holds one 2-channel texel per pixel: the pixel's own luma plus the chroma sample shared with its horizontal pair (U in even texels, V in odd texels). This allows wrapping packed 10-bit 4:2:2 textures (e.g. DXGI_FORMAT_Y210 exposed through an aliased R16G16 view) in SkImages via the existing YUVA machinery. The config is guarded by SK_ENABLE_YUVA_PACKED_422, which is off by default; embedders opt in via SkUserConfig.h.
+  * Skia no longer provides default SkExecutor implementations and the corresponding factories have been removed from SkExecutor.h.
+
+    Clients wishing to accelerate their applications with threading should implement their own SkExecutor-derived classes.
+  * Added the optional `SK_ASSUME_SINGLE_GANESH_CONTEXT` build define. Clients that guarantee at
+    most one `GrDirectContext` is in use per process may define it to skip the spinlock that protects
+    Ganesh's global `GrProcessor` memory pool. This replaces the previous behavior where the lock
+    was implicitly disabled by `SK_BUILD_FOR_ANDROID_FRAMEWORK`.
+
+* * *
+
+Milestone 156
+-------------
+
+* * *
+
+Milestone 155
+-------------
+  * The error handling associated with Ganesh's GrDirectContext flushing has been updated. Instead of returning a GrSemaphoresSubmitted value which conflates semaphore submission and flush success, a new FlushResult struct is returned - which explicitly separates the two concerns. FlushResult has an implicit cast which allows clients to still use the old GrSemaphoresSubmitted-based API.
+  * `skcpu::Context`, `skcpu::Recorder`, `GrRecordingContext::makeCPURecorder()`, and `skgpu::graphite::Context::makeCPURecorder()` have been removed.
+
+* * *
+
+Milestone 154
+-------------
+
+* * *
+
 Milestone 153
 -------------
   * `SkLogHandler` has been added as a global callback interface to intercept Skia's internal logs. Clients can implement this interface and install it via `SkLogHandler::SetInstance` to receive all messages generated through the `SKIA_LOG` macros. `SkLogHandler` uses `sk_sp` for shared ownership, allowing clients to maintain a reference to the handler.

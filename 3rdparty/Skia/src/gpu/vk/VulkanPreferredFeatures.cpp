@@ -136,6 +136,9 @@ struct DeviceExtensions {
     bool fMultisampledRenderToSingleSampledEXT = false;
     bool fHostImageCopyEXT = false;
     bool fPipelineCreationCacheControlEXT = false;
+    bool fPipelineProtectedAccessEXT = false;
+    bool fSubgroupSizeControlEXT = false;
+    bool fShaderMaximalReconvergenceKHR = false;
     bool fDriverPropertiesKHR = false;
     bool fCreateRenderpass2KHR = false;
     bool fLoadStoreOpNoneEXT = false;
@@ -205,6 +208,12 @@ void mark_device_extensions(DeviceExtensions& exts, const char* name) {
         exts.fHostImageCopyEXT = true;
     } else if (strcmp(name, VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME) == 0) {
         exts.fPipelineCreationCacheControlEXT = true;
+    } else if (strcmp(name, VK_EXT_PIPELINE_PROTECTED_ACCESS_EXTENSION_NAME) == 0) {
+        exts.fPipelineProtectedAccessEXT = true;
+    } else if (strcmp(name, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME) == 0) {
+        exts.fSubgroupSizeControlEXT = true;
+    } else if (strcmp(name, VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME) == 0) {
+        exts.fShaderMaximalReconvergenceKHR = true;
     } else if (strcmp(name, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME) == 0) {
         exts.fDriverPropertiesKHR = true;
     } else if (strcmp(name, VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME) == 0) {
@@ -280,6 +289,9 @@ struct FeaturesToAdd {
     bool fMultisampledRenderToSingleSampled = true;
     bool fHostImageCopy = true;
     bool fPipelineCreationCacheControl = true;
+    bool fPipelineProtectedAccess = true;
+    bool fSubgroupSizeControl = true;
+    bool fShaderMaximalReconvergence = true;
     bool fFrameBoundary = true;
     bool fSamplerYcbcrConversion = true;
 };
@@ -297,11 +309,15 @@ FeaturesToAdd get_features_to_query(uint32_t apiVersion,
         toQuery.fDynamicRenderingLocalRead = false;
         // VK_EXT_host_image_copy's feature is included in VkPhysicalDeviceVulkan14Features
         toQuery.fHostImageCopy = false;
+        // VK_EXT_pipeline_protected_access's feature is included in
+        // VkPhysicalDeviceVulkan14Features
+        toQuery.fPipelineProtectedAccess = false;
     } else {
         toQuery.fVulkan14 = false;
         // Check for support via individual extensions' feature structs
         toQuery.fDynamicRenderingLocalRead = exts.fDynamicRenderingLocalReadKHR;
         toQuery.fHostImageCopy = exts.fHostImageCopyEXT;
+        toQuery.fPipelineProtectedAccess = exts.fPipelineProtectedAccessEXT;
     }
     if (apiVersion >= VK_API_VERSION_1_3) {
         // VK_KHR_synchronization2's feature is included in VkPhysicalDeviceVulkan13Features
@@ -311,6 +327,8 @@ FeaturesToAdd get_features_to_query(uint32_t apiVersion,
         // VK_EXT_pipeline_creation_cache_control's feature is included in
         // VkPhysicalDeviceVulkan13Features
         toQuery.fPipelineCreationCacheControl = false;
+        // VK_EXT_subgroup_size_control's feature is included in VkPhysicalDeviceVulkan13Features
+        toQuery.fSubgroupSizeControl = false;
         // VK_EXT_extended_dynamic_state is core in Vulkan 1.3, but no feature for it is present in
         // VkPhysicalDeviceVulkan13Features; it's assumed supported / enabled.
         toQuery.fExtendedDynamicState = false;
@@ -325,6 +343,7 @@ FeaturesToAdd get_features_to_query(uint32_t apiVersion,
         toQuery.fSynchronization2 = exts.fSynchronization2KHR;
         toQuery.fDynamicRendering = exts.fDynamicRenderingKHR;
         toQuery.fPipelineCreationCacheControl = exts.fPipelineCreationCacheControlEXT;
+        toQuery.fSubgroupSizeControl = exts.fSubgroupSizeControlEXT;
         toQuery.fExtendedDynamicState = exts.fExtendedDynamicStateEXT;
         toQuery.fExtendedDynamicState2 = exts.fExtendedDynamicState2EXT;
     }
@@ -349,6 +368,7 @@ FeaturesToAdd get_features_to_query(uint32_t apiVersion,
     toQuery.fGraphicsPipelineLibrary = exts.fGraphicsPipelineLibraryEXT;
     toQuery.fRGBA10x6Formats = exts.fRGBA10x6FormatsEXT;
     toQuery.fMultisampledRenderToSingleSampled = exts.fMultisampledRenderToSingleSampledEXT;
+    toQuery.fShaderMaximalReconvergence = exts.fShaderMaximalReconvergenceKHR;
     toQuery.fFrameBoundary = exts.fFrameBoundaryEXT;
 
     // Then, go over appFeatures::pNext and exclude features that are already being queried by the
@@ -409,6 +429,15 @@ FeaturesToAdd get_features_to_query(uint32_t apiVersion,
                 break;
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES:
                 toQuery.fPipelineCreationCacheControl = false;
+                break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_PROTECTED_ACCESS_FEATURES:
+                toQuery.fPipelineProtectedAccess = false;
+                break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES:
+                toQuery.fSubgroupSizeControl = false;
+                break;
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR:
+                toQuery.fShaderMaximalReconvergence = false;
                 break;
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAME_BOUNDARY_FEATURES_EXT:
                 toQuery.fFrameBoundary = false;
@@ -501,6 +530,10 @@ void VulkanPreferredFeatures::addFeaturesToQuery(const VkExtensionProperties* de
         if (exts.fHostImageCopyEXT) {
             fHostImageCopy.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES;
         }
+        if (exts.fPipelineProtectedAccessEXT) {
+            fPipelineProtectedAccess.sType =
+                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_PROTECTED_ACCESS_FEATURES;
+        }
         if (exts.fLoadStoreOpNoneKHR) {
             fLoadStoreOpNoneExtension = VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME;
         } else if (exts.fLoadStoreOpNoneEXT) {
@@ -519,6 +552,10 @@ void VulkanPreferredFeatures::addFeaturesToQuery(const VkExtensionProperties* de
         if (exts.fPipelineCreationCacheControlEXT) {
             fPipelineCreationCacheControl.sType =
                     VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES;
+        }
+        if (exts.fSubgroupSizeControlEXT) {
+            fSubgroupSizeControl.sType =
+                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES;
         }
         if (exts.fExtendedDynamicStateEXT) {
             fExtendedDynamicState.sType =
@@ -597,7 +634,14 @@ void VulkanPreferredFeatures::addFeaturesToQuery(const VkExtensionProperties* de
         fExternalMemoryAHardwareBufferExtension =
                 VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME;
     }
+    if (exts.fQueueFamilyForeignEXT) {
+        fQueueFamilyForeignExtension = VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME;
+    }
 #endif
+    if (exts.fShaderMaximalReconvergenceKHR) {
+        fShaderMaximalReconvergence.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR;
+    }
     if (exts.fFrameBoundaryEXT) {
         fFrameBoundary.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAME_BOUNDARY_FEATURES_EXT;
     }
@@ -679,6 +723,18 @@ void VulkanPreferredFeatures::addFeaturesToQuery(const VkExtensionProperties* de
         SkASSERT(fPipelineCreationCacheControl.sType != 0);
         AddToPNextChain(&appFeatures, &fPipelineCreationCacheControl);
     }
+    if (toQuery.fPipelineProtectedAccess) {
+        SkASSERT(fPipelineProtectedAccess.sType != 0);
+        AddToPNextChain(&appFeatures, &fPipelineProtectedAccess);
+    }
+    if (toQuery.fSubgroupSizeControl) {
+        SkASSERT(fSubgroupSizeControl.sType != 0);
+        AddToPNextChain(&appFeatures, &fSubgroupSizeControl);
+    }
+    if (toQuery.fShaderMaximalReconvergence) {
+        SkASSERT(fShaderMaximalReconvergence.sType != 0);
+        AddToPNextChain(&appFeatures, &fShaderMaximalReconvergence);
+    }
     if (toQuery.fFrameBoundary) {
         SkASSERT(fFrameBoundary.sType != 0);
         AddToPNextChain(&appFeatures, &fFrameBoundary);
@@ -714,6 +770,9 @@ void VulkanPreferredFeatures::addFeaturesToEnable(std::vector<const char*>& appE
     toEnable.fMultisampledRenderToSingleSampled = fMultisampledRenderToSingleSampled.sType != 0;
     toEnable.fHostImageCopy = fHostImageCopy.sType != 0;
     toEnable.fPipelineCreationCacheControl = fPipelineCreationCacheControl.sType != 0;
+    toEnable.fPipelineProtectedAccess = fPipelineProtectedAccess.sType != 0;
+    toEnable.fSubgroupSizeControl = fSubgroupSizeControl.sType != 0;
+    toEnable.fShaderMaximalReconvergence = fShaderMaximalReconvergence.sType != 0;
     toEnable.fFrameBoundary = fFrameBoundary.sType != 0;
 
     // Note on enabling the YCbCr conversion feature: Regardless of whether Skia or the app added
@@ -780,10 +839,23 @@ void VulkanPreferredFeatures::addFeaturesToEnable(std::vector<const char*>& appE
             appExtensions.push_back(VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME);
             appEnabledExts.fHostImageCopyEXT = true;
         }
+        if (!appEnabledExts.fPipelineProtectedAccessEXT && toEnable.fPipelineProtectedAccess) {
+            appExtensions.push_back(VK_EXT_PIPELINE_PROTECTED_ACCESS_EXTENSION_NAME);
+            appEnabledExts.fPipelineProtectedAccessEXT = true;
+        }
         if (!appEnabledExts.fPipelineCreationCacheControlEXT &&
             toEnable.fPipelineCreationCacheControl) {
             appExtensions.push_back(VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME);
             appEnabledExts.fPipelineCreationCacheControlEXT = true;
+        }
+        if (!appEnabledExts.fSubgroupSizeControlEXT && toEnable.fSubgroupSizeControl) {
+            appExtensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+            appEnabledExts.fSubgroupSizeControlEXT = true;
+        }
+        if (!appEnabledExts.fShaderMaximalReconvergenceKHR &&
+            toEnable.fShaderMaximalReconvergence) {
+            appExtensions.push_back(VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME);
+            appEnabledExts.fShaderMaximalReconvergenceKHR = true;
         }
         if (!appEnabledExts.fFrameBoundaryEXT && toEnable.fFrameBoundary) {
             appExtensions.push_back(VK_EXT_FRAME_BOUNDARY_EXTENSION_NAME);
@@ -973,18 +1045,19 @@ void VulkanPreferredFeatures::addFeaturesToEnable(std::vector<const char*>& appE
         fVulkan13.privateData = VK_FALSE;
         fVulkan13.shaderDemoteToHelperInvocation = VK_FALSE;
         fVulkan13.shaderTerminateInvocation = VK_FALSE;
-        fVulkan13.subgroupSizeControl = VK_FALSE;
         fVulkan13.computeFullSubgroups = VK_FALSE;
         fVulkan13.textureCompressionASTC_HDR = VK_FALSE;
         fVulkan13.shaderZeroInitializeWorkgroupMemory = VK_FALSE;
         fVulkan13.shaderIntegerDotProduct = VK_FALSE;
         fVulkan13.maintenance4 = VK_FALSE;
 
-        // synchronization2, dynamicRendering and pipelineCreationCacheControl are required features
-        // of Vulkan 1.3.
+        // synchronization2, dynamicRendering, pipelineCreationCacheControl and subgroupSizeControl
+        // are required features of Vulkan 1.3. Graphite requires subgroupSizeControl to expose
+        // subgroup operations in compute shaders.
         fVulkan13.synchronization2 = VK_TRUE;
         fVulkan13.dynamicRendering = VK_TRUE;
         fVulkan13.pipelineCreationCacheControl = VK_TRUE;
+        fVulkan13.subgroupSizeControl = VK_TRUE;
     }
     if (toEnable.fVulkan14) {
         // Disable all features not used by Skia
@@ -1004,6 +1077,7 @@ void VulkanPreferredFeatures::addFeaturesToEnable(std::vector<const char*>& appE
         fVulkan14.indexTypeUint8 = VK_FALSE;
         fVulkan14.maintenance5 = VK_FALSE;
         fVulkan14.maintenance6 = VK_FALSE;
+        // Enabled later if we see protectedMemory is supported.
         fVulkan14.pipelineProtectedAccess = VK_FALSE;
         fVulkan14.pipelineRobustness = VK_FALSE;
         fVulkan14.pushDescriptor = VK_FALSE;
@@ -1032,6 +1106,9 @@ void VulkanPreferredFeatures::addFeaturesToEnable(std::vector<const char*>& appE
     fExtendedDynamicState2.extendedDynamicState2LogicOp = VK_FALSE;
     fExtendedDynamicState2.extendedDynamicState2PatchControlPoints = VK_FALSE;
 
+    // If chained by Skia, only enable subgroupSizeControl; Skia does not require full subgroups.
+    fSubgroupSizeControl.computeFullSubgroups = VK_FALSE;
+
 // Helper to enable a feature in the feature aggregate struct if it's enabled in the
 // extension-specific struct.  It reduces code verbosity but more importantly ensures the feature
 // name is identical and reduces chance of copy-paste mistakes.
@@ -1044,6 +1121,10 @@ void VulkanPreferredFeatures::addFeaturesToEnable(std::vector<const char*>& appE
                 auto* features = reinterpret_cast<VkPhysicalDeviceVulkan11Features*>(pNext);
                 // If this struct is not chained by Skia, copy enabled features.
                 if (features != &fVulkan11) {
+                    if (fVulkan11.protectedMemory && hasVulkan14Features) {
+                        fVulkan14.pipelineProtectedAccess = VK_TRUE;
+                    }
+
                     DUP_INTO(fVulkan11, storageBuffer16BitAccess);
                     DUP_INTO(fVulkan11, uniformAndStorageBuffer16BitAccess);
                     DUP_INTO(fVulkan11, storagePushConstant16);
@@ -1375,9 +1456,14 @@ void VulkanPreferredFeatures::addFeaturesToEnable(std::vector<const char*>& appE
                 break;
             }
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES: {
+                auto* features =
+                        reinterpret_cast<VkPhysicalDeviceProtectedMemoryFeatures*>(pNext);
+                if (hasVulkan14Features && features->protectedMemory) {
+                    // pipelineProtectedAccess is only required in Vulkan 1.4 if protectedMemory
+                    // is supported.
+                    fVulkan14.pipelineProtectedAccess = VK_TRUE;
+                }
                 if (hasVulkan11Features) {
-                    auto* features =
-                            reinterpret_cast<VkPhysicalDeviceProtectedMemoryFeatures*>(pNext);
                     DUP_INTO(fVulkan11, protectedMemory);
                 } else {
                     chain(newChainEnd, pNext);
@@ -1658,14 +1744,19 @@ void VulkanPreferredFeatures::addFeaturesToEnable(std::vector<const char*>& appE
                 break;
             }
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES: {
+                auto* features =
+                        reinterpret_cast<VkPhysicalDeviceSubgroupSizeControlFeatures*>(pNext);
                 if (hasVulkan13Features) {
-                    auto* features =
-                            reinterpret_cast<VkPhysicalDeviceSubgroupSizeControlFeatures*>(pNext);
                     DUP_INTO(fVulkan13, subgroupSizeControl);
                     DUP_INTO(fVulkan13, computeFullSubgroups);
                 } else {
                     chain(newChainEnd, pNext);
+                    // Enable the main feature
+                    if (appEnabledExts.fSubgroupSizeControlEXT) {
+                        features->subgroupSizeControl = VK_TRUE;
+                    }
                 }
+                toEnable.fSubgroupSizeControl = false;
                 break;
             }
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXTURE_COMPRESSION_ASTC_HDR_FEATURES: {
@@ -1810,7 +1901,14 @@ void VulkanPreferredFeatures::addFeaturesToEnable(std::vector<const char*>& appE
                     DUP_INTO(fVulkan14, pipelineProtectedAccess);
                 } else {
                     chain(newChainEnd, pNext);
+                    if (appEnabledExts.fPipelineProtectedAccessEXT) {
+                        auto* features =
+                                reinterpret_cast<VkPhysicalDevicePipelineProtectedAccessFeatures*>(
+                                        pNext);
+                        features->pipelineProtectedAccess = VK_TRUE;
+                    }
                 }
+                toEnable.fPipelineProtectedAccess = false;
                 break;
             }
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES: {
@@ -1821,6 +1919,17 @@ void VulkanPreferredFeatures::addFeaturesToEnable(std::vector<const char*>& appE
                 } else {
                     chain(newChainEnd, pNext);
                 }
+                break;
+            }
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR: {
+                chain(newChainEnd, pNext);
+                // Enable the main feature
+                if (appEnabledExts.fShaderMaximalReconvergenceKHR) {
+                    auto* features = reinterpret_cast<
+                            VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR*>(pNext);
+                    features->shaderMaximalReconvergence = VK_TRUE;
+                }
+                toEnable.fShaderMaximalReconvergence = false;
                 break;
             }
             case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAME_BOUNDARY_FEATURES_EXT: {
@@ -1899,6 +2008,15 @@ void VulkanPreferredFeatures::addFeaturesToEnable(std::vector<const char*>& appE
     }
     if (toEnable.fPipelineCreationCacheControl) {
         chain(newChainEnd, &fPipelineCreationCacheControl);
+    }
+    if (toEnable.fPipelineProtectedAccess) {
+        chain(newChainEnd, &fPipelineProtectedAccess);
+    }
+    if (toEnable.fSubgroupSizeControl) {
+        chain(newChainEnd, &fSubgroupSizeControl);
+    }
+    if (toEnable.fShaderMaximalReconvergence) {
+        chain(newChainEnd, &fShaderMaximalReconvergence);
     }
     if (toEnable.fFrameBoundary) {
         chain(newChainEnd, &fFrameBoundary);

@@ -15,6 +15,7 @@
 #include "src/core/SkChecksum.h"
 #include "src/core/SkTHash.h"
 #include "src/core/SkTraceEvent.h"
+#include "src/partition_alloc/raw_ptr.h"
 #include "src/sksl/GLSL.std.450.h"
 #include "src/sksl/SkSLAnalysis.h"
 #include "src/sksl/SkSLBuiltinTypes.h"
@@ -85,6 +86,7 @@
 #include "src/utils/SkBitSet.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <ctype.h>
@@ -98,8 +100,6 @@
 #include <vector>
 
 using namespace skia_private;
-
-#define kLast_Capability SpvCapabilityMultiViewport
 
 constexpr int DEVICE_FRAGCOORDS_BUILTIN = -1000;
 constexpr int DEVICE_CLOCKWISE_BUILTIN  = -1001;
@@ -132,10 +132,11 @@ static SpvStorageClass get_storage_class_spv_id(StorageClass storageClass) {
         case StorageClass::kUniform: return SpvStorageClassUniform;
         // Note: In SPIR-V 1.3, a storage buffer can be declared with the "StorageBuffer"
         // storage class and the "Block" decoration and the <1.3 approach we use here ("Uniform"
-        // storage class and the "BufferBlock" decoration) is deprecated. Since we target SPIR-V
-        // 1.0, we have to use the deprecated approach which is well supported in Vulkan and
+        // storage class and the "BufferBlock" decoration) is deprecated. The deprecated approach
+        // is still valid in SPIR-V 1.3 (which we target), is well supported in Vulkan, and
         // addresses SkSL use cases (notably SkSL currently doesn't support pointer features that
-        // would benefit from SPV_KHR_variable_pointers capabilities).
+        // would benefit from SPV_KHR_variable_pointers capabilities). BufferBlock is removed in
+        // SPIR-V 1.4, so targeting 1.4+ will require switching to the StorageBuffer approach.
         case StorageClass::kStorageBuffer: return SpvStorageClassUniform;
         case StorageClass::kOutput: return SpvStorageClassOutput;
         case StorageClass::kWorkgroup: return SpvStorageClassWorkgroup;
@@ -261,7 +262,7 @@ private:
 
     struct TempVar {
         SpvId spvId;
-        const Type* type;
+        raw_ptr<const Type> type;
         std::unique_ptr<SPIRVCodeGenerator::LValue> lvalue;
     };
 
@@ -530,6 +531,9 @@ private:
 
     void writeReturnStatement(const ReturnStatement& r, SPIRVBlob& out);
 
+    // Records that the module requires `capability`; emitted once by writeCapabilities.
+    void addCapability(SpvCapability capability) { fCapabilities.add(capability); }
+
     void writeCapabilities(SPIRVBlob& out);
 
     void writeInstructions(const Program& program, SPIRVBlob& out);
@@ -678,7 +682,11 @@ private:
 
     const MemoryLayout fDefaultMemoryLayout{MemoryLayout::Standard::k140};
 
-    uint64_t fCapabilities = 0;
+    // Capability IDs can exceed 64 (SPIR-V 1.3+ capabilities are >= 61 and extension capabilities
+    // are in the thousands), so they cannot fit in a uint64_t bitmask. As opposed to std::set,
+    // THashSet does not store capabilities in sorted order; however the order remains deterministic
+    // across compilations because it uses a fixed initial seed.
+    THashSet<SpvCapability> fCapabilities;
     SpvId fIdCount = spirv::kIdFirstUnreserved;
     SpvId fGLSLExtendedInstructions;
     struct Intrinsic {
@@ -695,14 +703,14 @@ private:
 
     Analysis::SpecializationInfo fSpecializationInfo;
     Analysis::SpecializationIndex fActiveSpecializationIndex = Analysis::kUnspecialized;
-    const Analysis::SpecializedParameters* fActiveSpecialization = nullptr;
+    raw_ptr<const Analysis::SpecializedParameters> fActiveSpecialization = nullptr;
 
     THashMap<const Variable*, SpvId> fVariableMap;
     THashMap<const Type*, SpvId> fStructMap;
 
     // SPIR-V is defined in 32-bit words, so this generator directly uses std::vector<uint32_t>
     // instead of an OutputStream.
-    SPIRVBlob* fOutBuffer;
+    raw_ptr<SPIRVBlob> fOutBuffer;
     SPIRVBlob fGlobalInitializersBuffer;
     SPIRVBlob fConstantBuffer;
     SPIRVBlob fVariableBuffer;
@@ -1098,6 +1106,7 @@ static bool is_globally_reachable_op(SpvOp_ op) {
         case SpvOpExecutionMode:
         case SpvOpMemoryModel:
         case SpvOpCapability:
+        case SpvOpExtension:
         case SpvOpExtInstImport:
         case SpvOpEntryPoint:
         case SpvOpSource:
@@ -1644,9 +1653,10 @@ SpvId SPIRVCodeGenerator::writeOpCompositeExtract(const Type& type,
 }
 
 void SPIRVCodeGenerator::writeCapabilities(SPIRVBlob& out) {
-    for (uint64_t i = 0, bit = 1; i <= kLast_Capability; i++, bit <<= 1) {
-        if (fCapabilities & bit) {
-            this->writeInstruction(SpvOpCapability, (SpvId) i, out);
+    for (SpvCapability capability : fCapabilities) {
+        // Shader is always emitted below.
+        if (capability != SpvCapabilityShader) {
+            this->writeInstruction(SpvOpCapability, (SpvId) capability, out);
         }
     }
     this->writeInstruction(SpvOpCapability, SpvCapabilityShader, out);
@@ -1903,7 +1913,7 @@ SpvId SPIRVCodeGenerator::getType(const Type& rawType,
         }
         case Type::TypeKind::kSampler: {
             if (SpvDimBuffer == type->dimensions()) {
-                fCapabilities |= 1ULL << SpvCapabilitySampledBuffer;
+                this->addCapability(SpvCapabilitySampledBuffer);
             }
             SpvId imageTypeId = this->getType(type->textureType(), typeLayout, memoryLayout,
                                               storageClass);
@@ -2313,10 +2323,12 @@ SpvId SPIRVCodeGenerator::writeSpecialIntrinsic(const FunctionCall& c, SpecialIn
                         SkASSERT(arg1Type.matches(*fContext.fTypes.fFloat3));
                     }
                     break;
-                case SpvDimCube:   // fall through
-                case SpvDimRect:   // fall through
-                case SpvDimBuffer: // fall through
-                case SpvDimSubpassData:
+                case SpvDimCube:              // fall through
+                case SpvDimRect:              // fall through
+                case SpvDimBuffer:            // fall through
+                case SpvDimSubpassData:       // fall through
+                case SpvDimTileImageDataEXT:  // fall through
+                case SpvDimMax:
                     break;
             }
             // Work around Nvidia bug when RelaxedPrecision is applied to
@@ -2425,7 +2437,7 @@ SpvId SPIRVCodeGenerator::writeSpecialIntrinsic(const FunctionCall& c, SpecialIn
             result = this->nextId(&callType);
             SkASSERT(arguments[0]->type().dimensions() == SpvDim2D);
 
-            fCapabilities |= 1ULL << SpvCapabilityImageQuery;
+            this->addCapability(SpvCapabilityImageQuery);
 
             SpvId dimsType = this->getType(callType);
             SpvId image = this->writeExpression(*arguments[0], out);
@@ -2446,7 +2458,7 @@ SpvId SPIRVCodeGenerator::writeSpecialIntrinsic(const FunctionCall& c, SpecialIn
         case kTextureHeight_SpecialIntrinsic: {
             result = this->nextId(&callType);
             SkASSERT(arguments[0]->type().dimensions() == SpvDim2D);
-            fCapabilities |= 1ULL << SpvCapabilityImageQuery;
+            this->addCapability(SpvCapabilityImageQuery);
 
             SpvId dimsType = this->getType(*fContext.fTypes.fUInt2);
             SpvId dims = this->nextId(&callType);
@@ -3096,7 +3108,7 @@ SpvId SPIRVCodeGenerator::writeMatrixConstructor(const ConstructorCompound& c, S
         // Special-case handling of float4 -> mat2x2.
         SkASSERT(type.rows() == 2 && type.columns() == 2);
         SkASSERT(arg0Type.columns() == 4);
-        SpvId v[4];
+        std::array<SpvId, 4> v;
         for (int i = 0; i < 4; ++i) {
             v[i] = this->writeOpCompositeExtract(type.componentType(), arguments[0], i, out);
         }
@@ -3503,8 +3515,8 @@ private:
     SPIRVCodeGenerator& fGen;
     const SpvId fVecPointer;
     ComponentArray fComponents;
-    const Type* fBaseType;
-    const Type* fSwizzleType;
+    raw_ptr<const Type> fBaseType;
+    raw_ptr<const Type> fSwizzleType;
     const StorageClass fStorageClass;
 };
 
@@ -3651,6 +3663,11 @@ std::unique_ptr<Expression> SPIRVCodeGenerator::identifier(std::string_view name
 
 SpvId SPIRVCodeGenerator::writeVariableReference(const VariableReference& ref, SPIRVBlob& out) {
     const Variable* variable = ref.variable();
+    if (IsSubgroupBuiltin(variable->layout().fBuiltin) && !fCaps.fSubgroupSupport) {
+        fContext.fErrors->error(ref.position(),
+                                "'" + std::string(variable->name()) + "' not supported");
+        return NA;
+    }
     switch (variable->layout().fBuiltin) {
         case DEVICE_FRAGCOORDS_BUILTIN: {
             // Down below, we rewrite raw references to sk_FragCoord with expressions that reference
@@ -4775,12 +4792,16 @@ void SPIRVCodeGenerator::writeLayout(const Layout& layout, SpvId target, Positio
     if (layout.fInputAttachmentIndex >= 0) {
         this->writeInstruction(SpvOpDecorate, target, SpvDecorationInputAttachmentIndex,
                                layout.fInputAttachmentIndex, fDecorationBuffer);
-        fCapabilities |= (((uint64_t) 1) << SpvCapabilityInputAttachment);
+        this->addCapability(SpvCapabilityInputAttachment);
     }
     if (layout.fBuiltin >= 0 && (layout.fBuiltin != SK_FRAGCOLOR_BUILTIN &&
                                  layout.fBuiltin != SK_SECONDARYFRAGCOLOR_BUILTIN)) {
             this->writeInstruction(SpvOpDecorate, target, SpvDecorationBuiltIn, layout.fBuiltin,
                                    fDecorationBuffer);
+            if (IsSubgroupBuiltin(layout.fBuiltin)) {
+                // The subgroup builtins require GroupNonUniform (SPIR-V 1.3).
+                this->addCapability(SpvCapabilityGroupNonUniform);
+            }
     }
 }
 
@@ -5743,6 +5764,13 @@ void SPIRVCodeGenerator::writeInstructions(const Program& program, SPIRVBlob& ou
         }
     }
     this->writeCapabilities(out);
+    // On Vulkan, maximal reconvergence only applies to entry points that opt in, so this is what
+    // makes ShaderCaps::fSubgroupMaximalReconvergence hold. Subgroups are only exposed in compute.
+    const bool maximallyReconverges = ProgramConfig::IsCompute(program.fConfig->fKind) &&
+                                      fCaps.fSubgroupMaximalReconvergence;
+    if (maximallyReconverges) {
+        this->writeInstruction(SpvOpExtension, "SPV_KHR_maximal_reconvergence", out);
+    }
     this->writeInstruction(SpvOpExtInstImport, fGLSLExtendedInstructions, "GLSL.std.450", out);
     this->writeInstruction(SpvOpMemoryModel, SpvAddressingModelLogical, SpvMemoryModelGLSL450, out);
     this->writeOpCode(SpvOpEntryPoint,
@@ -5775,6 +5803,12 @@ void SPIRVCodeGenerator::writeInstructions(const Program& program, SPIRVBlob& ou
                                SpvExecutionModeLocalSize,
                                localSizeX, localSizeY, localSizeZ,
                                out);
+        if (maximallyReconverges) {
+            this->writeInstruction(SpvOpExecutionMode,
+                                   fFunctionMap[mainKey],
+                                   SpvExecutionModeMaximallyReconvergesKHR,
+                                   out);
+        }
     }
     for (const ProgramElement* e : program.elements()) {
         if (e->is<Extension>()) {
@@ -5791,7 +5825,7 @@ void SPIRVCodeGenerator::writeInstructions(const Program& program, SPIRVBlob& ou
 bool SPIRVCodeGenerator::generateCode() {
     SkASSERT(!fContext.fErrors->errorCount());
     this->writeWord(SpvMagicNumber, *fOutBuffer);
-    this->writeWord(SpvVersion, *fOutBuffer);
+    this->writeWord(kSPIRVVersion, *fOutBuffer);
     this->writeWord(SKSL_MAGIC, *fOutBuffer);
     // Placeholder for id count, to be determined after writeInstruction.
     this->writeWord(0, *fOutBuffer);

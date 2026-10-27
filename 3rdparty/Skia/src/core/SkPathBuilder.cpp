@@ -27,6 +27,7 @@
 #include "src/core/SkVx.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -297,7 +298,7 @@ SkPath SkPathBuilder::snapshot(const SkMatrix* mx) const {
     }
     if (pdata && fType != SkPathIsAType::kGeneral) {
         SkASSERT(SkPathPriv::IsAxisAligned(fPts));
-        if (mx->rectStaysRect()) {
+        if (mx->rectStaysRect() && !pdata->bounds().isEmpty()) {
             auto [dir, start] = SkPathPriv::TransformDirAndStart(
                     *mx, fType == SkPathIsAType::kRRect, fIsA.fDirection, fIsA.fStartIndex);
             pdata->setupIsA(fType, dir, start);
@@ -478,8 +479,8 @@ SkPathBuilder& SkPathBuilder::arcTo(const SkRect& oval, SkScalar startAngle, SkS
         return *this;
     }
 
-    SkConic conics[SkConic::kMaxConicsForArc];
-    int count = build_arc_conics(oval, startV, stopV, dir, conics, &singlePt);
+    std::array<SkConic, SkConic::kMaxConicsForArc> conics;
+    int count = build_arc_conics(oval, startV, stopV, dir, conics.data(), &singlePt);
     if (count) {
         this->incReserve(count * 2 + 1);
         const SkPoint& pt = conics[0].fPts[0];

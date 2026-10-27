@@ -44,6 +44,7 @@
 #include "src/utils/SkMatrix22.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -369,14 +370,15 @@ static void pack4xHToMask(const SkPixmap& src, SkMaskBuilder& dst,
     // but is still sharper on small stems and small rounded corners than gray.
     // This also seems to be about as wide as one can get and only have a three pixel kernel.
     // TODO: calculate these at runtime so parameters can be adjusted (esp contrast).
-    static const unsigned int coefficients[LCD_PER_PIXEL][SAMPLES_PER_PIXEL*3] = {
-        //The red subpixel is centered inside the first sample (at 1/6 pixel), and is shifted.
-        { 0x03, 0x0b, 0x1c, 0x33,  0x40, 0x39, 0x24, 0x10,  0x05, 0x01, 0x00, 0x00, },
-        //The green subpixel is centered between two samples (at 1/2 pixel), so is symetric
-        { 0x00, 0x02, 0x08, 0x16,  0x2b, 0x3d, 0x3d, 0x2b,  0x16, 0x08, 0x02, 0x00, },
-        //The blue subpixel is centered inside the last sample (at 5/6 pixel), and is shifted.
-        { 0x00, 0x00, 0x01, 0x05,  0x10, 0x24, 0x39, 0x40,  0x33, 0x1c, 0x0b, 0x03, },
-    };
+    static constexpr std::array<std::array<unsigned int, SAMPLES_PER_PIXEL * 3>, LCD_PER_PIXEL>
+        coefficients = {{
+            // The red subpixel is centered inside the first sample (at 1/6 pixel), and is shifted.
+            { 0x03, 0x0b, 0x1c, 0x33,  0x40, 0x39, 0x24, 0x10,  0x05, 0x01, 0x00, 0x00, },
+            // The green subpixel is centered between two samples (at 1/2 pixel), so is symetric
+            { 0x00, 0x02, 0x08, 0x16,  0x2b, 0x3d, 0x3d, 0x2b,  0x16, 0x08, 0x02, 0x00, },
+            // The blue subpixel is centered inside the last sample (at 5/6 pixel), and is shifted.
+            { 0x00, 0x00, 0x01, 0x05,  0x10, 0x24, 0x39, 0x40,  0x33, 0x1c, 0x0b, 0x03, },
+        }};
 
     size_t dstPB = toA8 ? sizeof(uint8_t) : sizeof(uint16_t);
     for (int y = 0; y < height; ++y) {
@@ -395,7 +397,7 @@ static void pack4xHToMask(const SkPixmap& src, SkMaskBuilder& dst,
         // TODO: this fir filter implementation is straight forward, but slow.
         // It should be possible to make it much faster.
         for (int sample_x = -4; sample_x < sample_width + 4; sample_x += 4) {
-            int fir[LCD_PER_PIXEL] = { 0 };
+            std::array<int, LCD_PER_PIXEL> fir = { 0 };
             for (int sample_index = std::max(0, sample_x - 4), coeff_index = sample_index - (sample_x - 4)
                 ; sample_index < std::min(sample_x + 8, sample_width)
                 ; ++sample_index, ++coeff_index)
@@ -445,8 +447,11 @@ static void pack4xHToMask(const SkPixmap& src, SkMaskBuilder& dst,
 }
 
 #if defined(SK_USE_LCD_TEXT_3X_FILTER)
-static void pack3xHToMask(const SkPixmap& src, SkMaskBuilder& dst,
-                          const bool doBGR, const bool doVert) {
+static void pack3xHToMask(const SkPixmap& src,
+                          SkMaskBuilder& dst,
+                          const SkMaskGamma::PreBlend& maskPreBlend,
+                          const bool doBGR,
+                          const bool doVert) {
     static constexpr int kSamplesPerPixel = 3;
     // FreeType's default 5-tap LCD filter:
     // https://freetype.org/freetype2/docs/reference/ft2-lcd_rendering.html
@@ -513,6 +518,11 @@ static void pack3xHToMask(const SkPixmap& src, SkMaskBuilder& dst,
                 r = std::max(r, 10u);
                 g = std::max(g, 10u);
                 b = std::max(b, 10u);
+            }
+            if (maskPreBlend.isApplicable()) {
+                r = maskPreBlend.fR[r];
+                g = maskPreBlend.fG[g];
+                b = maskPreBlend.fB[b];
             }
             *(uint16_t*)dstP = SkPack888ToRGB16(r, g, b);
             dstP = SkTAddOffset<uint8_t>(dstP, dstPDelta);
@@ -683,7 +693,7 @@ void SkScalerContext::GenerateImageFromPath(
             break;
         case SkMask::kLCD16_Format:
 #if defined(SK_USE_LCD_TEXT_3X_FILTER)
-            pack3xHToMask(dst, dstMask, doBGR, verticalLCD);
+            pack3xHToMask(dst, dstMask, maskPreBlend, doBGR, verticalLCD);
 #else
             pack4xHToMask(dst, dstMask, maskPreBlend, doBGR, verticalLCD);
 #endif
@@ -708,6 +718,14 @@ void SkScalerContext::getImage(const SkGlyph& origGlyph) {
         sk_sp<SkMaskFilter> mf = std::move(fMaskFilter);
         tmpGlyph = this->makeGlyph(origGlyph.getPackedID(), &tmpGlyphPathDataStorage);
         fMaskFilter = std::move(mf);
+
+        // makeGlyph() may not be deterministic across loads, and imageSize() is 0 for
+        // both empty and too-large glyphs (which would falsely pass the storage check
+        // below). Bail out and clear origGlyph's image if tmpGlyph is empty or too large
+        if (tmpGlyph.isEmpty() || tmpGlyph.imageTooLarge()) {
+            sk_bzero(origGlyph.fImage, origGlyph.imageSize());
+            return;
+        }
 
         // Use the origGlyph storage for the temporary unfiltered mask if it will fit.
         if (tmpGlyph.fMaskFormat == origGlyph.fMaskFormat &&
@@ -778,6 +796,13 @@ void SkScalerContext::getImage(const SkGlyph& origGlyph) {
                                               origGlyph.iRect(), origGlyph.rowBytes(),
                                               origGlyph.maskFormat());
         SkIRect origBounds = dstMask.fBounds;
+
+        // If the unfiltered and the filtered bounds diverged so far that they do not
+        // overlap, there is nothing valid to copy; leave origGlyph's image cleared
+        if (!SkIRect::Intersects(srcMask.fBounds, dstMask.fBounds)) {
+            sk_bzero(origGlyph.fImage, origGlyph.imageSize());
+            return;
+        }
 
         // Find the intersection of src and dst while updating the fImages.
         if (srcMask.fBounds.fTop < dstMask.fBounds.fTop) {

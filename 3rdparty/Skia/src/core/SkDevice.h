@@ -26,6 +26,7 @@
 #include "include/core/SkSurfaceProps.h"
 #include "include/private/SkAssert.h"
 #include "include/private/SkNoncopyable.h"
+#include "include/private/SkOnlyStackAllocatable.h"
 #include "include/private/SkTArray.h"
 #include "src/core/SkMatrixPriv.h"
 #include "src/shaders/SkShaderBase.h"
@@ -33,24 +34,24 @@
 #include <cstdint>
 #include <utility>
 
-struct SkArc;
-class SkColorSpace;
-class SkMesh;
-struct SkDrawShadowRec;
-class SkImageFilter;
-class SkRasterHandleAllocator;
-class SkSpecialImage;
 class GrRecordingContext;
+class SkColorSpace;
 class SkData;
 class SkDrawable;
 class SkImage;
+class SkImageFilter;
+class SkMesh;
 class SkPaint;
 class SkPath;
 class SkPixmap;
 class SkRRect;
+class SkRasterHandleAllocator;
 class SkRecorder;
+class SkSpecialImage;
 class SkSurface;
 class SkVertices;
+struct SkArc;
+struct SkDrawShadowRec;
 enum SkColorType : int;
 enum class SkBlendMode;
 enum class SkScalerContextFlags : uint32_t;
@@ -72,8 +73,8 @@ class Device;
 class Recorder;
 }
 namespace sktext::gpu {
-class SubRunControl;
 class Slug;
+class SubRunControl;
 }
 
 struct SkStrikeDeviceInfo {
@@ -465,7 +466,8 @@ public:
     /**
      * Draw rrect with an optimized path for analytic blurs, if provided by the device.
      */
-    virtual bool drawBlurredRRect(const SkRRect&, const SkPaint&, float deviceSigma) {
+    virtual bool drawBlurredRRect(const SkRRect&, const SkPaint&,
+                                  SkV2 localSigma, float deviceSigma) {
         return false;
     }
 
@@ -637,6 +639,8 @@ private:
 
 class [[nodiscard]] SkAutoDeviceTransformRestore : SkNoncopyable {
 public:
+    SK_ONLY_STACK_ALLOCATABLE;
+
     SkAutoDeviceTransformRestore(SkDevice* device, const SkM44& localToDevice)
         : fDevice(device)
         , fPrevLocalToDevice(device->localToDevice())

@@ -10,7 +10,9 @@
 
 #include "include/core/SkSpan.h"
 #include "include/core/SkTypes.h"
+#include "include/private/SkAttributes.h"
 #include "include/private/SkMacros.h"
+#include "include/private/SkOnlyStackAllocatable.h"
 #include "include/private/SkTArray.h"
 #include "src/core/SkChecksum.h"
 #include "src/gpu/graphite/BuiltInCodeSnippetID.h"
@@ -141,7 +143,7 @@ public:
 
     bool operator==(const PaintParamsKey& that) const {
         return fData.size() == that.fData.size() &&
-               !memcmp(fData.data(), that.fData.data(), fData.size());
+               SK_UNSAFE_TODO(!memcmp(fData.data(), that.fData.data(), fData.size_bytes()));
     }
     bool operator!=(const PaintParamsKey& that) const { return !(*this == that); }
 
@@ -352,6 +354,8 @@ private:
 
 class AutoLockBuilderAsKey {
 public:
+    SK_ONLY_STACK_ALLOCATABLE;
+
     AutoLockBuilderAsKey(PaintParamsKeyBuilder* builder)
             : fBuilder(builder)
             , fKey(builder->lockAsKey()) {}

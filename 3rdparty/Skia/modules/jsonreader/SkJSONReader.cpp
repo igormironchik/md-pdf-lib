@@ -13,12 +13,14 @@
 #include "include/core/SkString.h"
 #include "include/private/SkDebug.h"
 #include "include/private/SkMalloc.h"
+#include "include/private/SkTemplates.h"
 #include "include/private/SkTo.h"
 #include "include/utils/SkParse.h"
 #include "src/core/SkArenaAlloc.h"
 #include "src/core/SkAutoLocaleSetter.h"
 #include "src/core/SkUTF.h"
 
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
@@ -86,18 +88,21 @@ NumberValue::NumberValue(float f) {
 
 // Vector recs point to externally allocated slabs with the following layout:
 //
-//   [size_t n] [REC_0] ... [REC_n-1] [optional extra trailing storage]
+//   [size_t n] [optional alignment padding] [REC_0] ... [REC_n-1] [optional extra trailing storage]
 //
 // Long strings use extra_alloc_size == 1 to store the \0 terminator.
 //
 template <typename T, size_t extra_alloc_size = 0>
 static void* MakeVector(size_t vec_size, const void* src, size_t src_size, SkArenaAlloc& alloc) {
+    // Storage for the vector size plus padding to ensure proper T alignment.
+    static constexpr size_t kHeaderSize = std::max(sizeof(size_t), alignof(T));
+
     // The Ts are already in memory, so their size should be safe.
-    const auto total_size = sizeof(size_t) + vec_size * sizeof(T) + extra_alloc_size;
+    const auto total_size = kHeaderSize + vec_size * sizeof(T) + extra_alloc_size;
     auto* size_ptr = reinterpret_cast<size_t*>(alloc.makeBytesAlignedTo(total_size, kRecAlign));
 
     *size_ptr = vec_size;
-    sk_careful_memcpy(size_ptr + 1, src, src_size * sizeof(T));
+    sk_careful_memcpy(SkTAddOffset<void>(size_ptr, kHeaderSize), src, src_size * sizeof(T));
 
     return size_ptr;
 }
@@ -273,7 +278,7 @@ namespace {
 // bit 3 (0x08) - 0-9
 // bit 4 (0x10) - 0-9 e E .
 // bit 5 (0x20) - scope terminator (} ])
-static constexpr uint8_t g_token_flags[256] = {
+static constexpr std::array<uint8_t, 256> g_token_flags = {
  // 0    1    2    3    4    5    6    7      8    9    A    B    C    D    E    F
     4,   4,   4,   4,   4,   4,   4,   4,     4,   6,   6,   4,   4,   6,   4,   4, // 0
     4,   4,   4,   4,   4,   4,   4,   4,     4,   4,   4,   4,   4,   4,   4,   4, // 1
@@ -303,8 +308,7 @@ static inline const char* skip_ws(const char* p) {
 }
 
 static inline float pow10(int32_t exp) {
-    static constexpr float g_pow10_table[63] =
-    {
+    static constexpr std::array<float, 63> g_pow10_table = {
        1.e-031f, 1.e-030f, 1.e-029f, 1.e-028f, 1.e-027f, 1.e-026f, 1.e-025f, 1.e-024f,
        1.e-023f, 1.e-022f, 1.e-021f, 1.e-020f, 1.e-019f, 1.e-018f, 1.e-017f, 1.e-016f,
        1.e-015f, 1.e-014f, 1.e-013f, 1.e-012f, 1.e-011f, 1.e-010f, 1.e-009f, 1.e-008f,

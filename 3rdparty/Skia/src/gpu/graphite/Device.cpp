@@ -40,7 +40,9 @@
 #include "include/gpu/graphite/TextureInfo.h"
 #include "include/private/SingleOwner.h"
 #include "include/private/SkAssert.h"
+#include "include/private/SkAttributes.h"
 #include "include/private/SkFloatingPoint.h"
+#include "include/private/SkOnlyStackAllocatable.h"
 #include "include/private/SkTo.h"
 #include "src/core/SkArenaAlloc.h"
 #include "src/core/SkBlendModePriv.h"
@@ -67,9 +69,6 @@
 #include "src/gpu/graphite/ContextPriv.h"
 #include "src/gpu/graphite/ContextUtils.h"
 #include "src/gpu/graphite/DrawAtlas.h"
-#include "src/gpu/graphite/DrawContext.h"
-#include "src/gpu/graphite/DrawList.h"
-#include "src/gpu/graphite/DrawParams.h"
 #include "src/gpu/graphite/DrawTypes.h"
 #include "src/gpu/graphite/Image_Base_Graphite.h"
 #include "src/gpu/graphite/Image_Graphite.h"
@@ -86,7 +85,11 @@
 #include "src/gpu/graphite/TextureProxy.h"
 #include "src/gpu/graphite/TextureProxyView.h"
 #include "src/gpu/graphite/TextureUtils.h"
+#include "src/gpu/graphite/draw/DrawContext.h"
+#include "src/gpu/graphite/draw/DrawList.h"
+#include "src/gpu/graphite/draw/DrawParams.h"
 #include "src/gpu/graphite/geom/AnalyticBlurMask.h"
+#include "src/gpu/graphite/geom/AnalyticRRectBlurMask.h"
 #include "src/gpu/graphite/geom/BoundsManager.h"
 #include "src/gpu/graphite/geom/CoverageMaskShape.h"
 #include "src/gpu/graphite/geom/EdgeAAQuad.h"
@@ -104,6 +107,15 @@
 #include "src/text/gpu/SubRunContainer.h"
 #include "src/text/gpu/TextBlobRedrawCoordinator.h"
 #include "src/text/gpu/VertexFiller.h"
+
+#if defined(SK_ENABLE_SPARSE_STRIPS)
+#include "src/gpu/graphite/GlobalCache.h"
+#include "src/gpu/graphite/SharedContext.h"
+#include "src/gpu/graphite/geom/EndCaps.h"
+#include "src/gpu/graphite/geom/WideTiles.h"
+#include "src/gpu/graphite/sparse_strips/SparseStripsConfig.h"
+#include "src/gpu/graphite/sparse_strips/StripGenerator.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -323,6 +335,8 @@ bool is_simple_shape(const Shape& shape, const Transform& localToDevice, SkStrok
 
 class ScopedDrawBuilder {
 public:
+    SK_ONLY_STACK_ALLOCATABLE;
+
     explicit ScopedDrawBuilder(Recorder* recorder)
             : fRecorder(recorder),
               fKeyAndDataBuilder(fRecorder->priv().popOrCreateKeyAndDataBuilder()) {
@@ -413,7 +427,8 @@ sk_sp<Device> Device::Make(Recorder* recorder,
                            const SkSurfaceProps& props,
                            LoadOp initialLoadOp,
                            std::string_view label,
-                           bool registerWithRecorder) {
+                           bool registerWithRecorder,
+                           bool allowUnpremul) {
     SkASSERT(!(mipmapped == Mipmapped::kYes && backingFit == SkBackingFit::kApprox));
     if (!recorder) {
         return nullptr;
@@ -429,12 +444,13 @@ sk_sp<Device> Device::Make(Recorder* recorder,
 
     return Make(recorder,
                 TextureProxy::Make(caps, recorder->priv().resourceProvider(),
-                                   backingDimensions, textureInfo, label, budgeted),
+                                   backingDimensions, textureInfo, budgeted, label),
                 ii.dimensions(),
                 ii.colorInfo(),
                 props,
                 initialLoadOp,
-                registerWithRecorder);
+                registerWithRecorder,
+                allowUnpremul);
 }
 
 sk_sp<Device> Device::Make(Recorder* recorder,
@@ -443,7 +459,8 @@ sk_sp<Device> Device::Make(Recorder* recorder,
                            const SkColorInfo& colorInfo,
                            const SkSurfaceProps& props,
                            LoadOp initialLoadOp,
-                           bool registerWithRecorder) {
+                           bool registerWithRecorder,
+                           bool allowUnpremul) {
     if (!recorder || !target) {
         return nullptr;
     }
@@ -475,7 +492,8 @@ sk_sp<Device> Device::Make(Recorder* recorder,
                                               std::move(target),
                                               deviceSize,
                                               colorInfo,
-                                              props);
+                                              props,
+                                              allowUnpremul);
     if (!dc) {
         return nullptr;
     } else if (initialLoadOp == LoadOp::kClear) {
@@ -522,6 +540,16 @@ Device::Device(Recorder* recorder, sk_sp<DrawContext> dc)
         , fSubRunControl(recorder->priv().caps()->getSubRunControl(
                 fDC->surfaceProps().isUseDeviceIndependentFonts())) {
     SkASSERT(SkToBool(fDC) && SkToBool(fRecorder));
+#if defined(SK_ENABLE_SPARSE_STRIPS)
+    if (recorder->priv().rendererProvider()->pathRendererStrategy() ==
+        PathRendererStrategy::kCPUSparseStripsMSAA8) {
+        fStripGenerator = std::make_unique<StripGenerator>(
+                this->width(),
+                this->height(),
+                recorder->priv().sharedContext()->globalCache()->getLUTArray(),
+                recorder);
+    }
+#endif
 }
 
 Device::~Device() {
@@ -1271,7 +1299,7 @@ void Device::drawDRRect(const SkRRect& outer, const SkRRect& inner, const SkPain
                 break;
             }
 
-            strokeCorners[i] = {strokeCorner, strokeCorner};
+            SK_UNSAFE_TODO(strokeCorners[i]) = {strokeCorner, strokeCorner};
             validCorners++;
         }
 
@@ -1418,19 +1446,20 @@ void Device::drawEdgeAAImageSet(const SkCanvas::ImageSetEntry set[], int count,
     // SkPaint paintWithShader(paint);
     int dstClipIndex = 0;
     for (int i = 0; i < count; ++i) {
+        const auto& entry = SK_UNSAFE_TODO(set[i]);
         // If the entry is clipped by 'dstClips', that must be provided
-        SkASSERT(!set[i].fHasClip || dstClips);
+        SkASSERT(!entry.fHasClip || dstClips);
         // Similarly, if it has an extra transform, those must be provided
-        SkASSERT(set[i].fMatrixIndex < 0 || preViewMatrices);
+        SkASSERT(entry.fMatrixIndex < 0 || preViewMatrices);
 
         // See SkImageShader::MakeForDrawRect, as this behavior is consistent but avoids
         // allocating SkShader objects or having to modify the SkPaint.
         // Adjust `dst` such that it only samples from the portion of fSrcRect that overlaps with
         // the image bounds. This "decal" effect is applied geometrically to what is drawn so that
         // actual texture tiling can be clamped to the src rect.
-        const SkRect imageBounds = SkRect::Make(set[i].fImage->bounds());
-        SkRect dstToDraw = set[i].fDstRect;
-        SkRect subset = set[i].fSrcRect;
+        const SkRect imageBounds = SkRect::Make(entry.fImage->bounds());
+        SkRect dstToDraw = entry.fDstRect;
+        SkRect subset = entry.fSrcRect;
         SkMatrix localMatrix = SkMatrix::RectToRectOrIdentity(subset, dstToDraw);
         if (!imageBounds.contains(subset)) {
             if (subset.intersect(imageBounds)) {
@@ -1442,16 +1471,16 @@ void Device::drawEdgeAAImageSet(const SkCanvas::ImageSetEntry set[], int count,
         }
         if (!dstToDraw.isEmpty()) {
             PaintParams::SimpleImage imageShader{
-                    set[i].fImage.get(),
+                    entry.fImage.get(),
                     &localMatrix,
                     constraint == SkCanvas::kStrict_SrcRectConstraint ? subset : imageBounds,
                     sampling};
 
             // NOTE: See drawEdgeAAQuad for details, we do not snap non-AA quads.
-            SkEnumBitMask<EdgeAAQuad::Flags> flags =
-                    static_cast<EdgeAAQuad::Flags>(set[i].fAAFlags);
-            EdgeAAQuad quad = set[i].fHasClip ? EdgeAAQuad(dstClips + dstClipIndex, flags)
-                                              : EdgeAAQuad(dstToDraw, flags);
+            SkEnumBitMask<EdgeAAQuad::Flags> flags = static_cast<EdgeAAQuad::Flags>(entry.fAAFlags);
+            EdgeAAQuad quad = entry.fHasClip
+                                      ? EdgeAAQuad(SK_UNSAFE_TODO(dstClips + dstClipIndex), flags)
+                                      : EdgeAAQuad(dstToDraw, flags);
 
             // TODO: Calling drawGeometry() for each entry re-evaluates the clip stack every time,
             // which is consistent with Ganesh's behavior. It also matches the behavior if edge-AA
@@ -1459,13 +1488,14 @@ void Device::drawEdgeAAImageSet(const SkCanvas::ImageSetEntry set[], int count,
             // However, we should explore the performance trade off with doing one bulk evaluation
             // for the whole set
             const SkMatrix* xtraXform =
-                    set[i].fMatrixIndex < 0 ? nullptr : &preViewMatrices[set[i].fMatrixIndex];
+                    entry.fMatrixIndex < 0 ? nullptr
+                                           : SK_UNSAFE_TODO(&preViewMatrices[entry.fMatrixIndex]);
             this->drawGeometry(xtraXform ? localToDevice.concat(SkM44(*xtraXform)) : localToDevice,
                                Geometry(quad),
-                               PaintParams(paint, imageShader, set[i].fAlpha),
+                               PaintParams(paint, imageShader, entry.fAlpha),
                                DefaultFillStyle());
         }
-        dstClipIndex += 4 * set[i].fHasClip;
+        dstClipIndex += 4 * entry.fHasClip;
     }
 }
 
@@ -1542,7 +1572,13 @@ void Device::drawAtlasSubRun(const sktext::gpu::AtlasSubRun* subRun,
     auto& glyphData = subRun->glyphVector().accessBackendData<GlyphData>();
 
     auto [bounds, maskToDevice] =
-            subRun->vertexFiller().boundsAndDeviceMatrix(localToDevice, drawOrigin);
+            subRun->vertexFiller().boundsAndDeviceMatrix(
+                    localToDevice, drawOrigin,
+                    fRecorder->priv().caps()->supportBilerpFromGlyphAtlas());
+
+    if (bounds.isEmpty()) {
+        return;
+    }
 
     for (int subRunCursor = 0; subRunCursor < subRunEnd;) {
         // For the remainder of the run, add any atlas uploads to the Recorder's TextAtlasManager
@@ -1692,6 +1728,12 @@ void Device::drawGeometry(const Transform& localToDevice,
     if (!renderer || renderer->outsetBoundsForAA()) {
         clip.outsetBoundsForAA();
     }
+#if defined(SK_ENABLE_SPARSE_STRIPS)
+    // EndCaps rasterize whole tiles, which can extend up to a tile past the shape's bounds.
+    if (renderer && renderer->step(0).renderStepID() == RenderStep::RenderStepID::kEndCap) {
+        clip.outsetBoundsToGrid();
+    }
+#endif
 
     TextureFormat format = fDC->target().proxy()->format();
     ShadingParams shading{fRecorder->priv().caps(),
@@ -1709,16 +1751,52 @@ void Device::drawGeometry(const Transform& localToDevice,
     SkStrokeRec::Style styleType = style.getStyle();
     if (renderer) {
         numNewRenderSteps = renderer->numRenderSteps();
-        if (styleType == SkStrokeRec::kStrokeAndFill_Style) {
-            SkASSERT(geometry.isShape());
+#if defined(SK_ENABLE_SPARSE_STRIPS)
+        if (renderer->step(0).renderStepID() == RenderStep::RenderStepID::kEndCap) {
             numNewRenderSteps +=
-                fRecorder->priv().rendererProvider()->tessellatedStrokes(
-                        /*inverseFill=*/false)->numRenderSteps();
-        } else if (styleType == SkStrokeRec::kFill_Style && renderer->useNonAAInnerFill()) {
+                fRecorder->priv().rendererProvider()->sparseStripsWideTile()->numRenderSteps();
+        } else
+#endif
+        if (styleType == SkStrokeRec::kFill_Style && renderer->useNonAAInnerFill()) {
             numNewRenderSteps +=
                 fRecorder->priv().rendererProvider()->nonAABounds()->numRenderSteps();
         }
     }
+
+#if defined(SK_ENABLE_SPARSE_STRIPS)
+    // If the textures backing the sparse strips renderers run out of space, we may need to trigger
+    // a flush here.
+    if (renderer && renderer->step(0).renderStepID() == RenderStep::RenderStepID::kEndCap) {
+        SkASSERT(localToDevice.valid());
+        SkASSERT(fStripGenerator);
+        SkASSERT(style.isFillStyle());
+
+        const SkPath& finalPath = geometry.shape().asPath();
+        SkMatrix ctm = localToDevice.matrix().asM33();
+
+        SkIRect clipBounds = clip.drawBounds().asSkIRect(); // Grid-snapped, so integral.
+        if (!fStripGenerator->processGeometry(finalPath, ctm, clipBounds)) {
+            SKIA_LOG_E("Failed to process geometry for sparse strips!");
+            return;
+        }
+        if (fStripGenerator->ends().empty() && fStripGenerator->wides().empty()) {
+            SKIA_LOG_W("Skipping draw with empty sparse strips geometry.");
+            return;
+        }
+
+        // To avoid #define mess, the sparse strips can trigger a flush here
+        // TODO (thomsmit): unify this with the existing flush system
+        if (fStripGenerator->hasNullCaps()) {
+            fRecorder->priv().flushTrackedDevices(
+                    SK_DUMP_TASKS_CODE("Device::drawGeometry Flush Before Draw"));
+            // TODO (thomsmit): implement scratch textures as a fallback of last resort.
+            if (!fStripGenerator->cleanupNullCaps()) {
+                SKIA_LOG_E("Failed to cleanup null endcaps after flush!");
+                return;
+            }
+        }
+    }
+#endif
 
     // Decide if we have any reason to flush pending work. A flush may be necessary for two reasons:
     //      1) A flush is required before updating the clip state or making any permanent changes to
@@ -1846,33 +1924,37 @@ void Device::drawGeometry(const Transform& localToDevice,
         fAtlasedPathCount++;
     }
 
-#if defined(SK_DEBUG)
-    // Renderers and their component RenderSteps have flexibility in defining their
-    // DepthStencilSettings. However, the clipping and ordering managed between Device and ClipStack
-    // requires that only LESS or LEQUAL depth tests are used for draws recorded through the
-    // client-facing, painters-order-oriented API. We assert here vs. in Renderer's constructor to
-    // allow internal-oriented Renderers that are never selected for a "regular" draw call to have
-    // more flexibility in their settings.
-    SkASSERT(renderer);
-    for (const RenderStep* step : renderer->steps()) {
-        auto dss = step->depthStencilSettings();
-        SkASSERT((!step->performsShading() || dss.fDepthTestEnabled) &&
-                 (!dss.fDepthTestEnabled ||
-                  dss.fDepthCompareOp == CompareOp::kLess ||
-                  dss.fDepthCompareOp == CompareOp::kLEqual));
+    // Determine whether or not this draw will also record an inner-fill draw. This must be done
+    // before visiting the clip stack so that any clips account for both draws' Z values.
+    const bool avoidDepthMode = fRecorder->priv().caps()->avoidDepthMode();
+    fCurrentDepth = fCurrentDepth.next();
+    DrawOrder order(fCurrentDepth);
+    Rect innerFillBounds = Rect::InfiniteInverted();
+
+    // TODO(michaelludwig): When `avoidDepthMode` is true and the device supports forward-pixel
+    // kill, we could record the inner fill after the main draw. Since blending will be disabled
+    // it will prevent earlier fragments from being shaded in the tile w/o requiring depth.
+    if ((dstUsage & DstUsage::kDstOnlyUsedByRenderer) &&
+            styleType == SkStrokeRec::kFill_Style &&
+            renderer->useNonAAInnerFill() &&
+            !avoidDepthMode) {
+        innerFillBounds = get_inner_bounds(geometry, localToDevice);
+        if (!innerFillBounds.isEmptyNegativeOrNaN()) {
+            // Advance depth one more time for the inner fill draw, which allows it to occlude the
+            // main draw regardless of using LESS or LEQUAL.
+            fCurrentDepth = fCurrentDepth.next();
+        }
     }
-#endif
 
     // Update the clip stack after issuing a flush (if it was needed). A draw will be recorded after
-    // this point.
-    DrawOrder order(fCurrentDepth.next());
+    // this point. `fCurrentDepth` is passed in because it's either the main draw's depth or the
+    // inner fill's +1 depth, ensuring that both are clipped if necessary.
     auto [clipOrder, clipLayer] = fClip.updateClipStateForDraw(
-            clip, clipElements, fColorDepthBoundsManager.get(), order.depth());
+            clip, clipElements, fColorDepthBoundsManager.get(), fCurrentDepth);
 
     // A draw's order always depends on the clips that must be drawn before it
     order.dependsOnPaintersOrder(clipOrder);
     bool useDrawListLayer = fRecorder->priv().caps()->useDrawListLayer();
-    bool avoidDepthMode = fRecorder->priv().caps()->avoidDepthMode();
     if (!useDrawListLayer) {
         // If a draw is not opaque, it must be drawn after the most recent draw it intersects with
         // in order to blend correctly. If there is no depth buffer, then always use painters order.
@@ -1902,34 +1984,30 @@ void Device::drawGeometry(const Transform& localToDevice,
         }
     }
 
-    if (styleType != SkStrokeRec::kFill_Style) {
-        SkASSERT(geometry.isShape());
-        // For inverse stroke-and-fill style, we perform a depth only draw of the stroke so when
-        // we perform our draw for the fill, we don't write over the stroked part. This ensures
-        // we keep the inverse fill outside of the entire shape including the stroke.
-        const bool isStrokeAndFill = styleType == SkStrokeRec::kStrokeAndFill_Style;
-        const bool depthOnlyStroke = isStrokeAndFill && geometry.isShape()
-                                                     && geometry.shape().inverted();
-        const Renderer* strokeRenderer = isStrokeAndFill
-                ? fRecorder->priv().rendererProvider()->tessellatedStrokes(/*inverseFill=*/false)
-                : renderer;
-        UniquePaintParamsID strokePaintID = depthOnlyStroke ? UniquePaintParamsID::Invalid()
-                                                            : paintID;
-        DrawOrder strokeOrder = order;
-        if (depthOnlyStroke) {
-            order.dependsOnPaintersOrder(strokeOrder.paintOrder());
-        }
+#if defined(SK_ENABLE_SPARSE_STRIPS)
+    if (renderer->step(0).renderStepID() == RenderStep::RenderStepID::kEndCap) {
+        const auto& ends = fStripGenerator->ends();
+        const auto& wides = fStripGenerator->wides();
 
-        StrokeStyle stroke(style.getWidth(), style.getMiter(), style.getJoin(), style.getCap());
-        fDC->recordDraw(strokeRenderer, localToDevice, geometry, clip, strokeOrder, strokePaintID,
-                        dstUsage, scopedDrawBuilder.gatherer(), &stroke, clipLayer);
-    } else if ((dstUsage & DstUsage::kDstOnlyUsedByRenderer) && renderer->useNonAAInnerFill() &&
-               !avoidDepthMode) {
-        // Possibly record an additional draw using the non-AA bounds renderer to fill the
-        // interior with a renderer that can disable blending entirely.
-        Rect innerFillBounds = get_inner_bounds(geometry, localToDevice);
-        if (!innerFillBounds.isEmptyNegativeOrNaN()) {
-            DrawOrder orderWithoutCoverage{order.depth()};
+        const RendererProvider* renderers = fRecorder->priv().rendererProvider();
+        if (!ends.empty()) {
+            fDC->recordDraw(renderers->sparseStripsEndCap(), localToDevice, Geometry(ends), clip,
+                            order, paintID, dstUsage, scopedDrawBuilder.gatherer(), nullptr,
+                            clipLayer);
+        }
+        // TODO (thomsmit): Update this to take the innerfill path with DstUsage::kNone and opaqueID
+        if (!wides.empty()) {
+            fDC->recordDraw(renderers->sparseStripsWideTile(), localToDevice, Geometry(wides), clip,
+                            order, paintID, dstUsage, scopedDrawBuilder.gatherer(), nullptr,
+                            clipLayer);
+        }
+    } else
+#endif
+    {
+        // If the depth was advanced past the main draw, that signals the inner fill needs recording
+        if (fCurrentDepth == order.depth().next()) {
+            SkASSERT(!innerFillBounds.isEmptyNegativeOrNaN());
+            DrawOrder orderWithoutCoverage{fCurrentDepth};
             orderWithoutCoverage.dependsOnPaintersOrder(clipOrder);
             // The regular draw has analytic coverage, so isn't being sorted front to back, but
             // we do want to sort the inner fill to maximize overdraw reduction
@@ -1944,23 +2022,17 @@ void Device::drawGeometry(const Transform& localToDevice,
             // early depth testing.
             order.dependsOnPaintersOrder(orderWithoutCoverage.paintOrder());
         }
-    }
 
-    if (styleType == SkStrokeRec::kFill_Style ||
-        styleType == SkStrokeRec::kStrokeAndFill_Style) {
+        StrokeStyle stroke(style.getWidth(), style.getMiter(), style.getJoin(), style.getCap());
         fDC->recordDraw(renderer, localToDevice, geometry, clip, order, paintID, dstUsage,
-                        scopedDrawBuilder.gatherer(), /*stroke=*/nullptr, clipLayer);
+                        scopedDrawBuilder.gatherer(),
+                        styleType == SkStrokeRec::kFill_Style ? nullptr : &stroke,
+                        clipLayer);
     }
 
     if (!useDrawListLayer) {
         fColorDepthBoundsManager->recordDraw(clip.drawBounds(), order.paintOrder());
     }
-    fCurrentDepth = order.depth();
-
-    // TODO(b/238758897): When we enable layer elision that depends on draws not overlapping, we
-    // can use the `getMostRecentDraw()` query to determine that, although that will mean querying
-    // even if the draw does not depend on dst (so should be only be used when the Device is an
-    // elision candidate).
 }
 
 void Device::drawClipShape(const Transform& localToDevice,
@@ -2059,6 +2131,11 @@ std::pair<const Renderer*, PathAtlas*> Device::chooseRenderer(const Transform& l
     SkASSERT(renderers);
     SkStrokeRec::Style type = style.getStyle();
 
+#if defined(SK_ENABLE_SPARSE_STRIPS)
+    // Currently, sparse strips geometry should only be produced in-situ in drawGeometry
+    SkASSERT(!geometry.isEndCaps() && !geometry.isWideTiles());
+#endif
+
     if (geometry.isSubRun()) {
         sktext::gpu::RendererData rendererData = geometry.subRunData().rendererData();
         if (!rendererData.isSDF) {
@@ -2098,6 +2175,8 @@ std::pair<const Renderer*, PathAtlas*> Device::chooseRenderer(const Transform& l
         }
     } else if (geometry.isAnalyticBlur()) {
         return {renderers->analyticBlur(), nullptr};
+    } else if (geometry.isAnalyticRRectBlur()) {
+        return {renderers->analyticRRectBlur(), nullptr};
     } else if (!geometry.isShape()) {
         // We must account for new Geometry types with specific Renderers
         return {nullptr, nullptr};
@@ -2151,7 +2230,13 @@ std::pair<const Renderer*, PathAtlas*> Device::chooseRenderer(const Transform& l
         }
     }
 
-    AtlasProvider* atlasProvider = fRecorder->priv().atlasProvider();
+    // TODO(thomsmit): Generalize the PathAtlas and StripGenerator dispatch into a "GeometrySpawner"
+    // producer abstraction. To avoid leaking Device state, the spawner should perform the upfront
+    // preparation (e.g. tiling, atlas allocation, and flushing if full) and yields N sub-primitives
+    // with their required Renderers (e.g. CoverageMask for path atlases, EndCaps + WideTiles for
+    // sparse strips). Device can then perform common paint/clip setup once, record each sub-draw
+    // into fDC, and potentially optimize DrawListLayer insertion.
+    AtlasProvider* atlasProvider = fRecorder->priv().getOrCreateAtlasProvider();
     switch (renderers->pathRendererStrategy()) {
         case PathRendererStrategy::kComputeAnalyticAA:
         case PathRendererStrategy::kComputeMSAA16:
@@ -2184,8 +2269,15 @@ std::pair<const Renderer*, PathAtlas*> Device::chooseRenderer(const Transform& l
             break;
 
         case PathRendererStrategy::kCPUSparseStripsMSAA8:
+#if defined(SK_ENABLE_SPARSE_STRIPS)
+            if (style.isFillStyle()) {
+                return {renderers->sparseStripsEndCap(), nullptr};
+            }
+            break;
+#else
             // Atlas in the future
             break;
+#endif
     }
 
     // If we got here, it requires tessellated path rendering or an MSAA technique applied to a
@@ -2209,26 +2301,23 @@ const Renderer* Device::chooseMSAARenderer(const Shape& shape,
         // depth test prevents double-blending when there is transparency, thus we can HW stroke
         // any path regardless of its paint.
         return renderers->tessellatedStrokes(shape.inverted());
+    } else if (type == SkStrokeRec::kFill_Style && shape.convex() && !shape.inverted()) {
+        // Regular convex fills can avoid the stencil buffer and don't vary by fill type.
+        return renderers->convexTessellatedWedges();
     }
 
-    // 'type' could be kStrokeAndFill, but in that case chooseRenderer() is meant to return the
-    // fill renderer since tessellatedStrokes() will always be used for the stroke pass.
-    if (shape.convex() && !shape.inverted()) {
-        // TODO: Ganesh doesn't have a curve+middle-out triangles option for convex paths, but it
-        // would be pretty trivial to spin up.
-        return renderers->convexTessellatedWedges();
+    // At this point the MSAA path rendering will require use of the stencil buffer
+    const bool preferWedges =
+            // TODO: Combine this heuristic with what is used in PathStencilCoverOp to choose
+            // between wedges curves consistently in Graphite and Ganesh.
+            (shape.isPath() && shape.path().countVerbs() < 50) || drawBounds.area() <= (256 * 256);
+    const bool strokeAndFill = type == SkStrokeRec::kStrokeAndFill_Style;
+    if (preferWedges) {
+        return strokeAndFill ? renderers->strokeAndFillTessellatedWedges(shape.fillType())
+                             : renderers->stencilTessellatedWedges(shape.fillType());
     } else {
-        const bool preferWedges =
-                // TODO: Combine this heuristic with what is used in PathStencilCoverOp to choose
-                // between wedges curves consistently in Graphite and Ganesh.
-                (shape.isPath() && shape.path().countVerbs() < 50) ||
-                drawBounds.area() <= (256 * 256);
-
-        if (preferWedges) {
-            return renderers->stencilTessellatedWedges(shape.fillType());
-        } else {
-            return renderers->stencilTessellatedCurvesAndTris(shape.fillType());
-        }
+        return strokeAndFill ? renderers->strokeAndFillTessellatedCurvesAndTris(shape.fillType())
+                             : renderers->stencilTessellatedCurvesAndTris(shape.fillType());
     }
 }
 
@@ -2303,7 +2392,7 @@ void Device::internalFlush() {
     ASSERT_SINGLE_OWNER
 
     // Push any pending uploads from the atlas provider that pending draws reference.
-    fRecorder->priv().atlasProvider()->recordUploads(fDC.get());
+    fRecorder->priv().recordAtlasProviderUploads(fDC.get());
 
     // Clip shapes are depth-only draws, but aren't recorded in the DrawContext until a flush in
     // order to determine the Z values for each element.
@@ -2318,7 +2407,7 @@ void Device::internalFlush() {
     fAtlasedPathCount = 0;
 
     // Any cleanup in the AtlasProvider
-    fRecorder->priv().atlasProvider()->compact();
+    fRecorder->priv().compactAtlasProvider();
 }
 
 bool Device::needsFlushBeforeDraw(int numNewRenderSteps, DstReadStrategy dstReadStrategy) {
@@ -2473,10 +2562,15 @@ sk_sp<sktext::gpu::Slug> Device::convertGlyphRunListToSlug(const sktext::GlyphRu
 
 void Device::drawSlug(SkCanvas* canvas, const sktext::gpu::Slug* slug, const SkPaint& paint) {
     auto slugImpl = static_cast<const sktext::gpu::SlugImpl*>(slug);
+    if (!slugImpl->canDraw(this->localToDevice(),
+                           fRecorder->priv().caps()->supportBilerpFromGlyphAtlas())) {
+        return;
+    }
     slugImpl->subRuns()->draw(canvas, slugImpl->origin(), paint, slugImpl, this->atlasDelegate());
 }
 
-bool Device::drawBlurredRRect(const SkRRect& rrect, const SkPaint& paint, float deviceSigma) {
+bool Device::drawBlurredRRect(const SkRRect& rrect, const SkPaint& paint,
+                              SkV2 localSigma, float deviceSigma) {
     if (skgpu::BlurIsEffectivelyIdentity(deviceSigma)) {
         this->drawRRect(rrect, paint);
         return true;
@@ -2496,6 +2590,19 @@ bool Device::drawBlurredRRect(const SkRRect& rrect, const SkPaint& paint, float 
     std::optional<AnalyticBlurMask> analyticBlur = AnalyticBlurMask::Make(
             this->recorder(), this->localToDeviceTransform(), deviceSigma, rrectToBlur);
     if (!analyticBlur) {
+#if !defined(SK_SUPPORT_LEGACY_GRAPHITE_RRECT_BLUR)
+        // Try using the analytic rrect blur specific mask.
+        std::optional<AnalyticRRectBlurMask> analyticRRectBlur = AnalyticRRectBlurMask::Make(
+                this->recorder(), this->localToDeviceTransform(), localSigma, rrectToBlur);
+        if (analyticRRectBlur) {
+            this->drawGeometry(this->localToDeviceTransform(),
+                               Geometry(*analyticRRectBlur),
+                               PaintParams(paint),
+                               SkStrokeRec(paint));
+            return true;
+        }
+#endif
+
         return false;
     }
 

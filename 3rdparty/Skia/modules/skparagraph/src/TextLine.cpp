@@ -25,6 +25,7 @@
 #include "modules/skshaper/include/SkShaper.h"
 #include "modules/skshaper/include/SkShaper_harfbuzz.h"
 #include "modules/skshaper/include/SkShaper_skunicode.h"
+#include "modules/skunicode/include/SkUnicode.h"
 
 #include <algorithm>
 #include <iterator>
@@ -34,6 +35,7 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 using namespace skia_private;
 
@@ -41,6 +43,13 @@ namespace skia {
 namespace textlayout {
 
 namespace {
+
+// Whether `text` resolves to a single bidi run when its base direction is `dir`.
+bool isSingleBidiRun(SkUnicode* unicode, const SkString& text, SkUnicode::TextDirection dir) {
+    std::vector<SkUnicode::BidiRegion> regions;
+    return unicode->getBidiRegions(text.c_str(), SkToInt(text.size()), dir, &regions) &&
+           regions.size() <= 1;
+}
 
 // TODO: deal with all the intersection functionality
 TextRange intersected(const TextRange& a, const TextRange& b) {
@@ -86,6 +95,50 @@ int compareRound(SkScalar a, SkScalar b, bool applyRoundingHack) {
     } else {
         return 1;
     }
+}
+
+bool shouldIsolateCluster(const ParagraphImpl* owner, const Cluster* cluster) {
+    int graphemes = 0;
+    for (size_t i = cluster->textRange().start; i < cluster->textRange().end; ++i) {
+        if (owner->codeUnitHasProperty(i, SkUnicode::CodeUnitFlags::kGraphemeStart)) {
+            ++graphemes;
+        }
+    }
+    return graphemes <= 1;
+}
+
+std::pair<size_t, size_t> isolateClusterGlyphs(const ParagraphImpl* owner,
+                                               const Run* run,
+                                               const Cluster* cluster,
+                                               TextRange originalTextRange,
+                                               bool isStart) {
+    const char* textStr = owner->text().data();
+    const char* ptr = textStr + cluster->textRange().start;
+    const char* endPtr = textStr + cluster->textRange().end;
+    if (cluster->size() > 1 &&
+        cluster->size() == SkToSizeT(SkUTF::CountUTF8(ptr, cluster->textRange().width()))) {
+        size_t g0 = cluster->endPos();
+        size_t g1 = cluster->startPos();
+        for (size_t k = 0; ptr < endPtr; ++k) {
+            size_t idx = ptr - textStr;
+            SkUTF::NextUTF8(&ptr, endPtr);
+            if (idx < originalTextRange.start || idx >= originalTextRange.end) {
+                continue;
+            }
+            size_t g = run->leftToRight() ? (cluster->startPos() + k)
+                                          : (cluster->endPos() - 1 - k);
+            g0 = std::min(g0, g);
+            g1 = std::max(g1, g + 1);
+        }
+        if (g0 < g1) {
+            return {g0, g1};
+        }
+    } else if (cluster->textRange().start >= originalTextRange.start) {
+        return {cluster->startPos(), cluster->endPos()};
+    }
+    size_t fallback =
+            (isStart == run->leftToRight()) ? cluster->endPos() : cluster->startPos();
+    return {fallback, fallback};
 }
 
 }  // namespace
@@ -144,19 +197,12 @@ TextLine::TextLine(ParagraphImpl* owner,
     // This is just chosen to catch the common/fast cases. Feel free to tweak.
     constexpr int kPreallocCount = 4;
     AutoSTArray<kPreallocCount, SkUnicode::BidiLevel> runLevels(numRuns);
-    std::vector<RunIndex> placeholdersInOriginalOrder;
     size_t runLevelsIndex = 0;
-    // Placeholders must be laid out using the original order in which they were added
-    // in the input. The API does not provide a way to indicate that a placeholder
-    // position was moved due to bidi reordering.
     for (auto runIndex = start.runIndex(); runIndex <= end.runIndex(); ++runIndex) {
         auto& run = fOwner->run(runIndex);
         runLevels[runLevelsIndex++] = run.fBidiLevel;
         fMaxRunMetrics.add(
             InternalLineMetrics(run.correctAscent(), run.correctDescent(), run.fFontMetrics.fLeading));
-        if (run.isPlaceholder()) {
-            placeholdersInOriginalOrder.push_back(runIndex);
-        }
     }
     SkASSERT(runLevelsIndex == numRuns);
 
@@ -165,14 +211,8 @@ TextLine::TextLine(ParagraphImpl* owner,
     // TODO: hide all these logic in SkUnicode?
     fOwner->getUnicode()->reorderVisual(runLevels.data(), numRuns, logicalOrder.data());
     auto firstRunIndex = start.runIndex();
-    auto placeholderIter = placeholdersInOriginalOrder.begin();
     for (auto index : logicalOrder) {
-        auto runIndex = firstRunIndex + index;
-        if (fOwner->run(runIndex).isPlaceholder()) {
-            fRunsInVisualOrder.push_back(*placeholderIter++);
-        } else {
-            fRunsInVisualOrder.push_back(runIndex);
-        }
+        fRunsInVisualOrder.push_back(firstRunIndex + index);
     }
 
     // TODO: This is the fix for flutter. Must be removed...
@@ -441,7 +481,11 @@ void TextLine::paintDecorations(ParagraphPainter* painter, SkScalar x, SkScalar 
     ParagraphPainterAutoRestore ppar(painter);
     painter->translate(x + this->offset().fX, y + this->offset().fY + style.getBaselineShift());
     Decorations decorations;
-    SkScalar correctedBaseline = SkScalarFloorToScalar(-this->sizes().rawAscent() + style.getBaselineShift() + 0.5);
+    // Gaps are cut where glyphs cross the decoration, so they must be measured against the
+    // baseline buildTextBlob() draws the text at, relative to the already shifted origin
+    SkScalar correctedBaseline =
+            SkScalarFloorToScalar(this->baseline() + style.getBaselineShift() + 0.5) -
+            style.getBaselineShift();
     decorations.paint(painter, style, context, correctedBaseline);
 }
 
@@ -641,31 +685,49 @@ void TextLine::createSoftHyphen() {
     if (!lastCluster.isSoftHyphen()) {
         return;
     }
+    // Only draw the hyphen if the line actually broke at the soft hyphen. It
+    // didn't if spaces or a hard line break follow it, which are trimmed into
+    // the ghost clusters, or if the soft hyphen ends the paragraph.
+    if (fClusterRange.end != fGhostClusterRange.end ||
+        fTextIncludingNewlines.end >= fOwner->text().size()) {
+        return;
+    }
 
-    SkString hyphenStr("-");
-    fHyphen = this->shapeEllipsis(hyphenStr, &lastCluster, /*isHyphen=*/true);
+    const SkString& hyphenStr = fOwner->paragraphStyle().getSoftHyphenString();
+    if (hyphenStr.isEmpty()) {
+        return;
+    }
+    fHyphen = this->shapeEllipsis(hyphenStr, &lastCluster);
     if (fHyphen) {
         fHyphen->fClusterStart = lastCluster.textRange().start;
+        // iterateThroughSingleRunByStyles builds testRange as
+        // [fClusterStart, fClusterStart + fTextRange.width()), so sizing fTextRange to
+        // lastCluster maps fHyphen directly to the U+00AD source range regardless of
+        // hyphenStr's UTF-8 byte length and removes the need for Run::isHyphen()
+        fHyphen->fTextRange = TextRange(0, lastCluster.textRange().width());
     }
 }
 
-std::unique_ptr<Run> TextLine::shapeEllipsis(const SkString& ellipsis,
-                                             const Cluster* cluster,
-                                             bool isHyphen) {
+std::unique_ptr<Run> TextLine::shapeEllipsis(const SkString& ellipsis, const Cluster* cluster) {
+    return ShapeString(fOwner, fBlockRange, ellipsis, cluster);
+}
+
+std::unique_ptr<Run> TextLine::ShapeString(ParagraphImpl* owner,
+                                           BlockRange blockRange,
+                                           const SkString& ellipsis,
+                                           const Cluster* cluster) {
 
     class ShapeHandler final : public SkShaper::RunHandler {
     public:
         ShapeHandler(SkScalar lineHeight,
                      bool useHalfLeading,
                      SkScalar baselineShift,
-                     const SkString& ellipsis,
-                     bool isHyphen)
+                     const SkString& ellipsis)
             : fRun(nullptr)
             , fLineHeight(lineHeight)
             , fUseHalfLeading(useHalfLeading)
             , fBaselineShift(baselineShift)
-            , fEllipsis(ellipsis)
-            , fIsHyphen(isHyphen) {}
+            , fEllipsis(ellipsis) {}
         std::unique_ptr<Run> run() & { return std::move(fRun); }
 
     private:
@@ -686,7 +748,6 @@ std::unique_ptr<Run> TextLine::shapeEllipsis(const SkString& ellipsis,
             fRun->fAdvance.fY = fRun->advance().fY;
             fRun->fPlaceholderIndex = std::numeric_limits<size_t>::max();
             fRun->fEllipsis = true;
-            fRun->fHyphen = fIsHyphen;
         }
 
         void commitLine() override {}
@@ -696,13 +757,12 @@ std::unique_ptr<Run> TextLine::shapeEllipsis(const SkString& ellipsis,
         bool fUseHalfLeading;
         SkScalar fBaselineShift;
         SkString fEllipsis;
-        bool fIsHyphen;
     };
 
     const Run& run = cluster->run();
-    TextStyle textStyle = fOwner->paragraphStyle().getTextStyle();
-    for (auto i = fBlockRange.start; i < fBlockRange.end; ++i) {
-        auto& block = fOwner->block(i);
+    TextStyle textStyle = owner->paragraphStyle().getTextStyle();
+    for (auto i = blockRange.start; i < blockRange.end; ++i) {
+        auto& block = owner->block(i);
         if (run.leftToRight() && cluster->textRange().end <= block.fRange.end) {
             textStyle = block.fStyle;
             break;
@@ -712,26 +772,38 @@ std::unique_ptr<Run> TextLine::shapeEllipsis(const SkString& ellipsis,
         }
     }
 
+    // Shape the affix in the surrounding run's direction, so neutral and weak
+    // characters in it (like a "!" after Arabic letters, or the default "-" and
+    // "…") take that direction instead of LTR. ShapeHandler only supports a
+    // single run, so if the affix would split in that direction (like
+    // "Read more…" in RTL text), shape it in the opposite direction instead.
+    SkBidiIterator::Level bidiLevel = run.bidiLevel();
+    if (sk_sp<SkUnicode> unicode = owner->getUnicode()) {
+        const bool ltr = run.leftToRight();
+        const auto runDir = ltr ? SkUnicode::TextDirection::kLTR : SkUnicode::TextDirection::kRTL;
+        const auto otherDir = ltr ? SkUnicode::TextDirection::kRTL : SkUnicode::TextDirection::kLTR;
+        if (!isSingleBidiRun(unicode.get(), ellipsis, runDir) &&
+            isSingleBidiRun(unicode.get(), ellipsis, otherDir)) {
+            bidiLevel = ltr ? SkBidiIterator::kRTL : SkBidiIterator::kLTR;
+        }
+    }
+
     auto shaped = [&](sk_sp<SkTypeface> typeface, sk_sp<SkFontMgr> fallback) -> std::unique_ptr<Run> {
-        ShapeHandler handler(run.heightMultiplier(),
-                             run.useHalfLeading(),
-                             run.baselineShift(),
-                             ellipsis,
-                             isHyphen);
+        ShapeHandler handler(
+                run.heightMultiplier(), run.useHalfLeading(), run.baselineShift(), ellipsis);
         SkFont font(std::move(typeface), textStyle.getFontSize());
         font.setEdging(textStyle.getFontEdging());
         font.setHinting(textStyle.getFontHinting());
         font.setSubpixel(textStyle.getSubpixel());
 
         std::unique_ptr<SkShaper> shaper = SkShapers::HB::ShapeDontWrapOrReorder(
-                fOwner->getUnicode(), fallback ? fallback : SkFontMgr::RefEmpty());
+                owner->getUnicode(), fallback ? fallback : SkFontMgr::RefEmpty());
 
-        const SkBidiIterator::Level defaultLevel = SkBidiIterator::kLTR;
         const char* utf8 = ellipsis.c_str();
         size_t utf8Bytes = ellipsis.size();
 
         std::unique_ptr<SkShaper::BiDiRunIterator> bidi = SkShapers::unicode::BidiRunIterator(
-                fOwner->getUnicode(), utf8, utf8Bytes, defaultLevel);
+                owner->getUnicode(), utf8, utf8Bytes, bidiLevel);
         SkASSERT(bidi);
 
         std::unique_ptr<SkShaper::LanguageRunIterator> language =
@@ -756,7 +828,7 @@ std::unique_ptr<Run> TextLine::shapeEllipsis(const SkString& ellipsis,
                       &handler);
         auto ellipsisRun = handler.run();
         ellipsisRun->fTextRange = TextRange(0, ellipsis.size());
-        ellipsisRun->fOwner = fOwner;
+        ellipsisRun->fOwner = owner;
         return ellipsisRun;
     };
 
@@ -767,7 +839,7 @@ std::unique_ptr<Run> TextLine::shapeEllipsis(const SkString& ellipsis,
     }
 
     // Check all allowed fonts
-    std::vector<sk_sp<SkTypeface>> typefaces = fOwner->fontCollection()->findTypefaces(
+    std::vector<sk_sp<SkTypeface>> typefaces = owner->fontCollection()->findTypefaces(
             textStyle.getFontFamilies(), textStyle.getFontStyle(), textStyle.getFontArguments());
     for (const auto& typeface : typefaces) {
         ellipsisRun = shaped(typeface, nullptr);
@@ -777,25 +849,24 @@ std::unique_ptr<Run> TextLine::shapeEllipsis(const SkString& ellipsis,
     }
 
     // Try the fallback
-    if (fOwner->fontCollection()->fontFallbackEnabled()) {
+    if (owner->fontCollection()->fontFallbackEnabled()) {
         const char* ch = ellipsis.c_str();
       SkUnichar unicode = SkUTF::NextUTF8WithReplacement(&ch,
                                                          ellipsis.c_str()
                                                              + ellipsis.size());
         // We do not expect emojis in ellipsis so if they appeat there
         // they will not be resolved with the pretiest color emoji font
-        auto typeface = fOwner->fontCollection()->defaultFallback(
-                                            unicode,
-                                            textStyle.getFontFamilies(),
-                                            textStyle.getFontStyle(),
-                                            textStyle.getLocale(),
-                                            textStyle.getFontArguments());
-        if (typeface) {
-            ellipsisRun = shaped(typeface, fOwner->fontCollection()->getFallbackManager());
-            if (ellipsisRun->isResolved()) {
-                return ellipsisRun;
-            }
-        }
+      auto typeface = owner->fontCollection()->defaultFallback(unicode,
+                                                               textStyle.getFontFamilies(),
+                                                               textStyle.getFontStyle(),
+                                                               textStyle.getLocale(),
+                                                               textStyle.getFontArguments());
+      if (typeface) {
+          ellipsisRun = shaped(typeface, owner->fontCollection()->getFallbackManager());
+          if (ellipsisRun->isResolved()) {
+              return ellipsisRun;
+          }
+      }
     }
     return ellipsisRun;
 }
@@ -817,7 +888,9 @@ TextLine::ClipContext TextLine::measureTextInsideOneRun(TextRange textRange,
                                        run->calculateHeight(this->fAscentStyle,this->fDescentStyle));
         return result;
     } else if (run->isPlaceholder()) {
-        result.fTextShift = runOffsetInLine;
+        // Placeholder glyph positions retain their origin from shaping. Translate
+        // that origin to the visual run position, just as for regular text runs.
+        result.fTextShift = runOffsetInLine - run->positionX(0);
         if (SkIsFinite(run->fFontMetrics.fAscent)) {
           result.clip = SkRect::MakeXYWH(runOffsetInLine,
                                          sizes().runTop(run, this->fAscentStyle),
@@ -895,12 +968,55 @@ TextLine::ClipContext TextLine::measureTextInsideOneRun(TextRange textRange,
                              run->calculateWidth(result.pos, result.pos + result.size, false),
                              run->calculateHeight(this->fAscentStyle,this->fDescentStyle));
 
-    // Correct the width in case the text edges don't match clusters
-    // TODO: This is where we get smart about selecting a part of a cluster
-    //  by shaping each grapheme separately and then use the result sizes
-    //  to calculate the proportions
-    auto leftCorrection = start->sizeToChar(originalTextRange.start);
-    auto rightCorrection = end->sizeFromChar(originalTextRange.end - 1);
+    // When a style boundary splits a grapheme cluster (base + combining marks), isolate
+    // the glyphs belonging to originalTextRange instead of geometrically slicing the
+    // cluster's bounding box; proportional clipping is reserved for multi-grapheme ligatures
+    SkScalar leftCorrection = 0;
+    SkScalar rightCorrection = 0;
+    bool startSplit = originalTextRange.start > start->textRange().start;
+    bool endSplit = originalTextRange.end < end->textRange().end;
+    if (startSplit || endSplit) {
+        size_t startG0 = start->startPos();
+        size_t startG1 = start->endPos();
+        size_t endG0 = end->startPos();
+        size_t endG1 = end->isHardBreak() ? end->startPos() : end->endPos();
+        bool isolated = false;
+
+        if (startSplit) {
+            if (shouldIsolateCluster(fOwner, start)) {
+                std::tie(startG0, startG1) =
+                        isolateClusterGlyphs(fOwner, run, start, originalTextRange, true);
+                isolated = true;
+            } else {
+                leftCorrection = start->sizeToChar(originalTextRange.start);
+            }
+        }
+        if (endSplit) {
+            if (start == end && isolated) {
+                endG0 = startG0;
+                endG1 = startG1;
+            } else if (shouldIsolateCluster(fOwner, end)) {
+                std::tie(endG0, endG1) =
+                        isolateClusterGlyphs(fOwner, run, end, originalTextRange, false);
+                isolated = true;
+            } else {
+                rightCorrection = end->sizeFromChar(originalTextRange.end - 1);
+            }
+        }
+
+        if (isolated) {
+            result.pos = run->leftToRight() ? startG0 : endG0;
+            size_t endPos = run->leftToRight() ? endG1 : startG1;
+            result.size = endPos > result.pos ? (endPos - result.pos) : 0;
+            result.clip = SkRect::MakeXYWH(
+                    0,
+                    sizes().runTop(run, this->fAscentStyle),
+                    run->calculateWidth(result.pos, result.pos + result.size, false),
+                    run->calculateHeight(this->fAscentStyle, this->fDescentStyle));
+            textStartInRun = run->positionX(result.pos);
+        }
+    }
+
     /*
     SkDebugf("[%d: %d) => [%d: %d), @%d, %d: [%f:%f) + [%f:%f) = ", // جَآَهُ
              originalTextRange.start, originalTextRange.end, textRange.start, textRange.end,
@@ -1093,16 +1209,21 @@ void TextLine::iterateThroughVisualRuns(bool includingGhostSpaces, const RunVisi
     SkScalar totalWidth = 0;
     auto textRange = includingGhostSpaces ? this->textWithNewlines() : this->trimmedText();
 
+    // In RTL, the line-end affix sits at the left edge and is visited before text runs;
+    // honor a false return (e.g. from getGlyphPositionAtCoordinate when dx hits the affix)
+    // so subsequent runs do not overwrite the visitor's result
     if (this->ellipsis() != nullptr && fOwner->paragraphStyle().getTextDirection() == TextDirection::kRtl) {
         runOffset = this->ellipsis()->offset().fX;
-        if (visitor(ellipsis(), runOffset, ellipsis()->textRange(), &width)) {
+        if (!visitor(ellipsis(), runOffset, ellipsis()->textRange(), &width)) {
+            return;
         }
     }
 
     if (this->hyphen() != nullptr &&
         fOwner->paragraphStyle().getTextDirection() == TextDirection::kRtl) {
         runOffset = this->hyphen()->offset().fX;
-        if (visitor(hyphen(), runOffset, hyphen()->textRange(), &width)) {
+        if (!visitor(hyphen(), runOffset, hyphen()->textRange(), &width)) {
+            return;
         }
     }
 
@@ -1232,18 +1353,21 @@ void TextLine::getRectsForRange(TextRange textRange0,
     this->iterateThroughVisualRuns(true,
         [textRange0, rectHeightStyle, rectWidthStyle, &boxes, &lastRun, startBox, this]
         (const Run* run, SkScalar runOffsetInLine, TextRange textRange, SkScalar* runWidthInLine) {
-        // The rendered soft hyphen is a synthetic glyph run that does not correspond
-        // to any source text. Its synthetic textRange (offsets into the "-" string)
-        // would falsely intersect caller-supplied source ranges and produce a
-        // spurious selection rect at the line-end hyphen position. Skip it.
-        if (run->isHyphen()) {
-            return true;
-        }
+        // For fHyphen (which has fEllipsis = true), iterateThroughSingleRunByStyles
+        // always returns run->advance().fX for *runWidthInLine and passes the U+00AD
+        // cluster's source range as textRange to the visitor below
         *runWidthInLine = this->iterateThroughSingleRunByStyles(
         TextAdjustment::GraphemeGluster, run, runOffsetInLine, textRange, StyleType::kNone,
         [run, runOffsetInLine, textRange0, rectHeightStyle, rectWidthStyle, &boxes, &lastRun, startBox, this]
         (TextRange textRange, const TextStyle& style, const TextLine::ClipContext& lineContext) {
-
+            if (fHyphen != nullptr && !run->isEllipsis()) {
+                // Exclude the line-final U+00AD cluster from normal text runs: its visual
+                // glyph is emitted by fHyphen, while the unrendered U+00AD cluster in the
+                // text run would emit a second box (breaking fallback fonts, letterSpacing,
+                // and BiDi lines where fHyphen and the text run are not adjacent)
+                textRange = textRange * TextRange(fTextIncludingNewlines.start,
+                                                  fHyphen->fClusterStart);
+            }
             auto intersect = textRange * textRange0;
             if (intersect.empty()) {
                 return true;
@@ -1448,9 +1572,17 @@ PositionWithAffinity TextLine::getGlyphPositionAtCoordinate(SkScalar dx) {
         [this, dx, &result]
         (const Run* run, SkScalar runOffsetInLine, TextRange textRange, SkScalar* runWidthInLine) {
             if (run->isEllipsis()) {
-                auto utf16Index = fOwner->getUTF16Index(this->fText.end);
-                result = { SkToS32(utf16Index) , kDownstream };
-                return false;
+                // In LTR the affix is visited last (only reached when dx is past all text
+                // runs); in RTL it is visited first at the left edge, so report its width
+                // to offset subsequent runs and only stop if dx is within/left of the affix
+                *runWidthInLine = run->advance().fX;
+                if (fOwner->paragraphStyle().getTextDirection() == TextDirection::kLtr ||
+                    dx <= this->offset().fX + runOffsetInLine + run->advance().fX) {
+                    auto utf16Index = fOwner->getUTF16Index(this->fText.end);
+                    result = { SkToS32(utf16Index) , kDownstream };
+                    return false;
+                }
+                return true;
             }
 
             bool keepLooking = true;
@@ -1537,8 +1669,11 @@ PositionWithAffinity TextLine::getGlyphPositionAtCoordinate(SkScalar dx) {
                     SkScalar averageGraphemeWidth = glyphemesWidth / graphemes.size();
                     SkScalar delta = dx - glyphemePosLeft;
                     int graphemeIndex = SkScalarNearlyZero(averageGraphemeWidth)
-                                         ? 0
-                                         : SkScalarFloorToInt(delta / averageGraphemeWidth);
+                                                ? 0
+                                                : SkScalarFloorToInt(delta / averageGraphemeWidth);
+                    // Justification shifts coordinates beyond glyph bounds;
+                    // clamp to valid graphemes
+                    graphemeIndex = std::clamp(graphemeIndex, 0, SkToInt(graphemes.size()) - 1);
                     auto graphemeCenter = glyphemePosLeft + graphemeIndex * averageGraphemeWidth +
                                           averageGraphemeWidth / 2;
                     auto graphemeUtf8Index = graphemes[graphemeIndex];
@@ -1570,33 +1705,44 @@ PositionWithAffinity TextLine::getGlyphPositionAtCoordinate(SkScalar dx) {
 }
 
 void TextLine::getRectsForPlaceholders(std::vector<TextBox>& boxes) {
+    std::vector<std::pair<TextIndex, TextBox>> placeholders;
     this->iterateThroughVisualRuns(
-        true,
-        [&boxes, this](const Run* run, SkScalar runOffset, TextRange textRange,
-                        SkScalar* width) {
+            true,
+            [&placeholders, this](
+                    const Run* run, SkScalar runOffset, TextRange textRange, SkScalar* width) {
                 auto context = this->measureTextInsideOneRun(
                         textRange, run, runOffset, 0, true, TextAdjustment::GraphemeGluster);
                 *width = context.clip.width();
 
-            if (textRange.width() == 0) {
-                return true;
-            }
-            if (!run->isPlaceholder()) {
-                return true;
-            }
+                if (textRange.width() == 0) {
+                    return true;
+                }
+                if (!run->isPlaceholder()) {
+                    return true;
+                }
 
-            SkRect clip = context.clip;
-            clip.offset(this->offset());
+                SkRect clip = context.clip;
+                clip.offset(this->offset());
 
-            if (fOwner->getApplyRoundingHack()) {
-                clip.fLeft = littleRound(clip.fLeft);
-                clip.fRight = littleRound(clip.fRight);
-                clip.fTop = littleRound(clip.fTop);
-                clip.fBottom = littleRound(clip.fBottom);
-            }
-            boxes.emplace_back(clip, run->getTextDirection());
-            return true;
-        });
+                if (fOwner->getApplyRoundingHack()) {
+                    clip.fLeft = littleRound(clip.fLeft);
+                    clip.fRight = littleRound(clip.fRight);
+                    clip.fTop = littleRound(clip.fTop);
+                    clip.fBottom = littleRound(clip.fBottom);
+                }
+                placeholders.emplace_back(run->textRange().start,
+                                          TextBox(clip, run->getTextDirection()));
+                return true;
+            });
+
+    // Measure in visual order, but return boxes in the order placeholders were added.
+    // Sorting by their text offsets also handles mixed-direction runs within a line.
+    std::sort(placeholders.begin(), placeholders.end(), [](const auto& a, const auto& b) {
+        return a.first < b.first;
+    });
+    for (const auto& placeholder : placeholders) {
+        boxes.push_back(placeholder.second);
+    }
 }
 }  // namespace textlayout
 }  // namespace skia

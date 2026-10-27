@@ -13,6 +13,7 @@
 #include "src/gpu/GpuTypesPriv.h"
 #include "src/gpu/graphite/GraphiteResourceKey.h"
 #include "src/gpu/graphite/ResourceTypes.h"
+#include "src/partition_alloc/raw_ptr.h"
 
 #include <atomic>
 #include <functional>
@@ -264,7 +265,7 @@ public:
     // when the content of the Resource object changes. This will never return 0.
     UniqueID uniqueID() const { return fUniqueID; }
 
-    const char* getLabel() const { return fLabel.c_str(); }
+    const std::string& getLabel() const { return fLabel; }
 
     // Tests whether a object has been abandoned or released. All objects will be in this state
     // after their creating Context is destroyed or abandoned.
@@ -691,7 +692,7 @@ private:
 
     // This is not ref'ed but internalDispose() will be called before the Gpu object is destroyed.
     // That call will set this to nullptr.
-    const SharedContext* fSharedContext;
+    raw_ptr<const SharedContext, DanglingUntriaged> fSharedContext;
 
     const UniqueID fUniqueID;
     const Ownership fOwnership;
@@ -708,7 +709,7 @@ private:
     //
     // A null value means the Resource is not in the return queue. A non-null value means it is in
     // the queue, although the ResourceCache assigns a special sentinel value for the tail address.
-    Resource* fNextInReturnQueue = nullptr;
+    raw_ptr<Resource> fNextInReturnQueue = nullptr;
 
     // The remaining fields are mutable state that is only modified by the ResourceCache on the
     // cache's thread, guarded by `fReturnCache::fSingleOwner`.

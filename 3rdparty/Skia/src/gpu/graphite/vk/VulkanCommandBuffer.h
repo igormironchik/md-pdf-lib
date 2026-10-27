@@ -11,7 +11,9 @@
 #include "src/gpu/graphite/CommandBuffer.h"
 
 #include "include/gpu/vk/VulkanTypes.h"
-#include "src/gpu/graphite/DrawPass.h"
+#include "src/gpu/graphite/compute/DispatchGroup.h"
+#include "src/gpu/graphite/draw/DrawPass.h"
+#include "src/gpu/graphite/vk/VulkanComputePipeline.h"
 #include "src/gpu/graphite/vk/VulkanGraphicsPipeline.h"
 #include "src/gpu/graphite/vk/VulkanResourceProvider.h"
 
@@ -36,21 +38,16 @@ public:
     void endStatsQuery(GpuStatsFlags) override;
     std::optional<GpuStats> gpuStats() override;
 
-    bool submit(VkQueue, const SubmitInfo&);
+    bool submit(VkQueue, const SubmitInfo&, bool includeFence = true);
 
     bool isFinished();
 
     void waitUntilFinished();
 
-    void addBufferMemoryBarrier(const Resource* resource,
-                                VkPipelineStageFlags srcStageMask,
-                                VkPipelineStageFlags dstStageMask,
-                                VkBufferMemoryBarrier* barrier);
     void addBufferMemoryBarrier(VkPipelineStageFlags srcStageMask,
                                 VkPipelineStageFlags dstStageMask,
                                 VkBufferMemoryBarrier* barrier);
-    void addImageMemoryBarrier(const Resource*,
-                               VkPipelineStageFlags srcStageMask,
+    void addImageMemoryBarrier(VkPipelineStageFlags srcStageMask,
                                VkPipelineStageFlags dstStageMask,
                                bool byRegion,
                                VkImageMemoryBarrier* barrier);
@@ -75,6 +72,8 @@ private:
                              const BackendSemaphore* signalSemaphores) override;
     void prepareSurfaceForStateUpdate(SkSurface* targetSurface,
                                       const MutableTextureState* newState) override;
+    void prepareBackendTextureForStateUpdate(const BackendTexture& texture,
+                                             const MutableTextureState* newState) override;
 
     const Sampler* getSampler(const DrawPassCommands::BindTexturesAndSamplers* command,
                               int32_t index);
@@ -88,6 +87,7 @@ private:
                          const DrawPassList&) override;
 
     bool beginRenderPass(const RenderPassDesc&,
+                         SkIRect viewport,
                          const Texture* colorTexture,
                          const Texture* resolveTexture,
                          const Texture* depthStencilTexture);
@@ -175,18 +175,18 @@ private:
         kBufferMemory_BarrierType,
         kImageMemory_BarrierType
     };
-    void pipelineBarrier(const Resource* resource,
-                         VkPipelineStageFlags srcStageMask,
+    void pipelineBarrier(VkPipelineStageFlags srcStageMask,
                          VkPipelineStageFlags dstStageMask,
                          bool byRegion,
                          PipelineBarrierType barrierType,
                          void* barrier);
     void submitPipelineBarriers(bool forSelfDependency = false);
 
+    bool bindDispatchResources(const DispatchGroup& group, const DispatchGroup::Dispatch& dispatch);
+
     bool loadMSAAFromResolve(const RenderPassDesc&,
                              VulkanTexture& resolveTexture,
-                             SkISize dstDimensions,
-                             SkIRect nativeBounds);
+                             SkIRect renderArea);
     void nextSubpass();
     void setViewport(SkIRect viewport);
 
@@ -203,8 +203,12 @@ private:
     // Store a ptr to the active RenderPass's target texture so we have access to it for any
     // AddBarrier DrawPassCommands that pertain to the dst. A raw ptr is acceptable here because the
     // target texture is kept alive via a command buffer reference.
+    //
+    // WARNING: If this is an MSAA color attachment, its dimensions may be larger than the
+    // framebuffer's dimensions.
     VulkanTexture* fTargetTexture = nullptr;
     const VulkanGraphicsPipeline* fActiveGraphicsPipeline = nullptr;
+    const VulkanComputePipeline* fActiveComputePipeline = nullptr;
 
     VkFence fSubmitFence = VK_NULL_HANDLE;
 
@@ -224,6 +228,7 @@ private:
     bool fBindTextureSamplers = false;
 
     std::array<BindBufferInfo, VulkanGraphicsPipeline::kMaxNumUniformBuffers> fUniformBuffersToBind;
+    const Texture* fBoundStorageFallbackTexture = nullptr;
     VkDescriptorSet fTextureSamplerDescSetToBind = VK_NULL_HANDLE;
 
     int fNumTextureSamplers = 0;

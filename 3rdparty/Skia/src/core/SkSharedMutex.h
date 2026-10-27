@@ -9,11 +9,14 @@
 #define SkSharedLock_DEFINED
 
 #include "include/private/SkDebug.h"
+#include "include/private/SkOnlyStackAllocatable.h"
 #include "include/private/SkSemaphore.h"
 #include "include/private/SkThreadAnnotations.h"
 
 #ifdef SK_DEBUG
     #include "include/private/SkMutex.h"
+
+    #include <array>
     #include <memory>
 #endif  // SK_DEBUG
 
@@ -59,7 +62,7 @@ private:
     std::unique_ptr<ThreadIDSet> fWaitingShared;
     int fSharedQueueSelect{0};
     mutable SkMutex fMu;
-    SkSemaphore fSharedQueue[2];
+    std::array<SkSemaphore, 2> fSharedQueue;
     SkSemaphore fExclusiveQueue;
 #else
     std::atomic<int32_t> fQueueCounts;
@@ -75,6 +78,8 @@ inline void SkSharedMutex::assertHeldShared() const {}
 
 class SK_SCOPED_CAPABILITY SkAutoSharedMutexExclusive {
 public:
+    SK_ONLY_STACK_ALLOCATABLE;
+
     explicit SkAutoSharedMutexExclusive(SkSharedMutex& lock) SK_ACQUIRE(lock)
             : fLock(lock) {
         lock.acquire();
@@ -87,6 +92,8 @@ private:
 
 class SK_SCOPED_CAPABILITY SkAutoSharedMutexShared {
 public:
+    SK_ONLY_STACK_ALLOCATABLE;
+
     explicit SkAutoSharedMutexShared(SkSharedMutex& lock) SK_ACQUIRE_SHARED(lock)
             : fLock(lock)  {
         lock.acquireShared();

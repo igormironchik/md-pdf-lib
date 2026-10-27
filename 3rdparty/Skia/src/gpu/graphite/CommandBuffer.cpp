@@ -16,13 +16,14 @@
 #include "src/core/SkTraceEvent.h"
 #include "src/gpu/RefCntedCallback.h"
 #include "src/gpu/graphite/Buffer.h"
-#include "src/gpu/graphite/DrawPass.h"
 #include "src/gpu/graphite/RenderPassDesc.h"
 #include "src/gpu/graphite/Resource.h"
 #include "src/gpu/graphite/ResourceProvider.h"
 #include "src/gpu/graphite/ResourceTypes.h"
 #include "src/gpu/graphite/Sampler.h"  // IWYU pragma: keep
 #include "src/gpu/graphite/Texture.h"
+#include "src/gpu/graphite/compute/DispatchGroup.h"
+#include "src/gpu/graphite/draw/DrawPass.h"
 
 #if defined(SK_DEBUG)
 #include "src/gpu/graphite/SharedContext.h"
@@ -56,6 +57,8 @@ void CommandBuffer::resetCommandBuffer() {
     this->releaseResources();
     this->onResetCommandBuffer();
     fBuffersToAsyncMap.clear();
+    fNumPendingCommands = 0;
+    fNumPendingPasses = 0;
 }
 
 void CommandBuffer::trackResource(sk_sp<Resource> resource) {
@@ -75,27 +78,6 @@ bool CommandBuffer::isResourceTracked(const Resource* resource) {
     return globalCache->isResourceTracked(resource);
 }
 #endif
-
-void CommandBuffer::addFinishedProc(sk_sp<RefCntedCallback> finishedProc) {
-    fFinishedProcs.push_back(std::move(finishedProc));
-}
-
-void CommandBuffer::callFinishedProcs(bool success) {
-    if (!success) {
-        for (int i = 0; i < fFinishedProcs.size(); ++i) {
-            fFinishedProcs[i]->setFailureResult();
-        }
-    } else {
-        if (auto stats = this->gpuStats()) {
-            for (int i = 0; i < fFinishedProcs.size(); ++i) {
-                if (fFinishedProcs[i]->receivesGpuStats()) {
-                    fFinishedProcs[i]->setStats(*stats);
-                }
-            }
-        }
-    }
-    fFinishedProcs.clear();
-}
 
 void CommandBuffer::addBuffersToAsyncMapOnSubmit(SkSpan<const sk_sp<Buffer>> buffers) {
     for (size_t i = 0; i < buffers.size(); ++i) {
@@ -121,8 +103,10 @@ bool CommandBuffer::addRenderPass(const RenderPassDesc& renderPassDesc,
     SkASSERT(!dstCopy || this->isResourceTracked(dstCopy));
 
     fRenderAreaBounds = SkIRect::MakeEmpty();
+    int totalCommands = 0;
     for (const auto& drawPass : drawPasses) {
         fRenderAreaBounds.join(drawPass->bounds());
+        totalCommands += drawPass->commandCount();
     }
     if (renderPassDesc.fColorAttachment.fLoadOp == LoadOp::kClear) {
         fRenderAreaBounds.join(fRenderTargetBounds);
@@ -182,6 +166,9 @@ bool CommandBuffer::addRenderPass(const RenderPassDesc& renderPassDesc,
     // something so trivial would be caught before getting here.
     SkDEBUGCODE(fHasWork = true;)
 
+    fNumPendingCommands += totalCommands;
+    fNumPendingPasses++;
+
     return true;
 }
 
@@ -193,6 +180,11 @@ bool CommandBuffer::addComputePass(DispatchGroupSpan dispatchGroups) {
     }
 
     SkDEBUGCODE(fHasWork = true;)
+
+    for (const auto& group : dispatchGroups) {
+        fNumPendingCommands += group->dispatches().size();
+    }
+    fNumPendingPasses++;
 
     return true;
 }
@@ -213,6 +205,8 @@ bool CommandBuffer::copyBufferToBuffer(const Buffer* srcBuffer,
     this->trackResource(std::move(dstBuffer));
 
     SkDEBUGCODE(fHasWork = true;)
+
+    fNumPendingCommands++;
 
     return true;
 }
@@ -235,6 +229,8 @@ bool CommandBuffer::copyTextureToBuffer(sk_sp<Texture> texture,
 
     SkDEBUGCODE(fHasWork = true;)
 
+    fNumPendingCommands++;
+
     return true;
 }
 
@@ -254,6 +250,8 @@ bool CommandBuffer::copyBufferToTexture(const Buffer* buffer,
     this->trackResource(std::move(texture));
 
     SkDEBUGCODE(fHasWork = true;)
+
+    fNumPendingCommands++;
 
     return true;
 }
@@ -280,6 +278,8 @@ bool CommandBuffer::copyTextureToTexture(sk_sp<Texture> src,
 
     SkDEBUGCODE(fHasWork = true;)
 
+    fNumPendingCommands++;
+
     return true;
 }
 
@@ -294,6 +294,7 @@ bool CommandBuffer::synchronizeBufferToCpu(sk_sp<Buffer> buffer) {
     if (didResultInWork) {
         this->trackResource(std::move(buffer));
         SkDEBUGCODE(fHasWork = true;)
+        fNumPendingCommands++;
     }
 
     return true;
@@ -308,6 +309,8 @@ bool CommandBuffer::clearBuffer(const Buffer* buffer, size_t offset, size_t size
     }
 
     SkDEBUGCODE(fHasWork = true;)
+
+    fNumPendingCommands++;
 
     return true;
 }

@@ -17,6 +17,7 @@
 #include "src/gpu/graphite/DescriptorData.h"
 #include "src/gpu/graphite/ResourceTypes.h"
 #include "src/gpu/graphite/UniquePaintParamsID.h"
+#include "src/partition_alloc/raw_ptr.h"
 
 namespace skgpu::graphite {
 
@@ -62,6 +63,8 @@ public:
     }
 
     const char* uniformSsboIndex() const { return fUniformSsboIndex; }
+
+    const DepthStencilSettings& depthStencilSettings() const { return fDepthStencilSettings; }
 
     DstReadStrategy dstReadStrategy() const { return fDstReadStrategy; }
     const skgpu::BlendInfo& blendInfo() const { return fBlendInfo; }
@@ -115,9 +118,19 @@ private:
                             const RenderStep*,
                             const SharedGeneratorData&);
 
-    const ShaderCodeDictionary* fShaderCodeDictionary;
-    const RuntimeEffectDictionary* fRuntimeEffectDictionary;
+#if defined(GPU_TEST_UTILS)
+    friend class TextureFallbackTest;
+    static std::string EmitStorageFallbackTexture(const ResourceBindingRequirements&,
+                                                  const RenderStep*);
+#endif
+
+    raw_ptr<const ShaderCodeDictionary> fShaderCodeDictionary;
+    raw_ptr<const RuntimeEffectDictionary> fRuntimeEffectDictionary;
     const char* fUniformSsboIndex;
+
+    // The final DepthStencilSettings for the pipeline, combined from the RenderStep's requirements
+    // and the rest of the render pass.
+    DepthStencilSettings fDepthStencilSettings;
 
     // The blendInfo represents the actual GPU blend operations, which may or may not completely
     // implement the paint and coverage blending defined by the root nodes.
@@ -133,12 +146,6 @@ private:
     int fNumFragmentTexturesAndSamplers = 0;
     bool fHasCombinedUniforms = false;
     SkEnumBitMask<PipelineStageFlags> fStorageBufferStages = {};
-
-#if defined(GPU_TEST_UTILS)
-    friend class TextureFallbackTest;
-    static std::string EmitStorageFallbackTexture(const ResourceBindingRequirements&,
-                                                  const RenderStep*);
-#endif
 
     // Append attributes defined by the render step and any attributes within the paint key via
     // a mesh shader snippet.

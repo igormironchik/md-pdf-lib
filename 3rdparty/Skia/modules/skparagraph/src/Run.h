@@ -94,6 +94,7 @@ public:
     SkScalar correctLeading() const { return fCorrectLeading; }
     const SkFont& font() const { return fFont; }
     bool leftToRight() const { return fBidiLevel % 2 == 0; }
+    uint8_t bidiLevel() const { return fBidiLevel; }
     TextDirection getTextDirection() const { return leftToRight() ? TextDirection::kLtr : TextDirection::kRtl; }
     size_t index() const { return fIndex; }
     SkScalar heightMultiplier() const { return fHeightMultiplier; }
@@ -111,7 +112,6 @@ public:
     ParagraphImpl* owner() const { return fOwner; }
 
     bool isEllipsis() const { return fEllipsis; }
-    bool isHyphen() const { return fHyphen; }
 
     void calculateMetrics();
     void updateMetrics(InternalLineMetrics* endlineMetrics);
@@ -214,7 +214,6 @@ private:
     SkScalar fCorrectLeading;
 
     bool fEllipsis;
-    bool fHyphen;
     uint8_t fBidiLevel;
     SkFourByteTag fScript;
     SkString fLanguage;
@@ -222,11 +221,25 @@ private:
 
 template<typename Visitor>
 void Run::iterateThroughClustersInTextOrder(Visitor visitor) {
+    // A 0-glyph run (when HarfBuzz hides all default-ignorables) still needs a 0-width
+    // cluster so every code unit in fTextRange maps to a valid cluster index
+    if (this->size() == 0) {
+        SkASSERT(!fTextRange.empty());
+        visitor(0,
+                0,
+                fTextRange.start,
+                fTextRange.end,
+                0.0f,
+                this->calculateHeight(LineMetricStyle::CSS, LineMetricStyle::CSS));
+        return;
+    }
     // Can't figure out how to do it with one code for both cases without 100 ifs
     // Can't go through clusters because there are no cluster table yet
     if (leftToRight()) {
         size_t start = 0;
-        size_t cluster = this->clusterIndex(start);
+        // Start from run begin so leading controls without glyphs are visited symmetrically
+        // with RTL
+        size_t cluster = this->fUtf8Range.begin();
         for (size_t glyph = 1; glyph <= this->size(); ++glyph) {
             auto nextCluster = this->clusterIndex(glyph);
             if (nextCluster <= cluster) {

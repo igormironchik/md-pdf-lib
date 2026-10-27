@@ -1310,6 +1310,12 @@ export interface ParagraphStyle {
     textHeightBehavior?: TextHeightBehavior;
     textStyle?: TextStyle;
     applyRoundingHack?: boolean;
+    renderSoftHyphens?: boolean;
+    /**
+     * The string drawn at line breaks that fall on a soft hyphen, when renderSoftHyphens is
+     * true. Defaults to "-"; an empty string draws nothing.
+     */
+    softHyphenString?: string;
 }
 
 export interface PositionWithAffinity {

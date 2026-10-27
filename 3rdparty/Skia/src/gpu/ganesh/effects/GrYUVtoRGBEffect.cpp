@@ -63,19 +63,64 @@ std::unique_ptr<GrFragmentProcessor> GrYUVtoRGBEffect::Make(const GrYUVATextureP
         return nullptr;
     }
 
+#if defined(SK_ENABLE_YUVA_PACKED_422)
+    const bool packedYUYV = yuvaProxies.yuvaInfo().planeConfig() ==
+                            SkYUVAInfo::PlaneConfig::kYUYV;
+#else
+    const bool packedYUYV = false;
+#endif
+    SkMatrix packedPlaneMatrix = SkMatrix::I();
+    SkRect packedSubset = SkRect::MakeEmpty();
+    GrSamplerState::WrapMode packedWrapModes[2] = {GrSamplerState::WrapMode::kClamp,
+                                                   GrSamplerState::WrapMode::kClamp};
+    if (packedYUYV) {
+        // Packed 4:2:2 has a single half-resolution plane with one 4-channel texel per 2x1 block of
+        // pixels: (Y0, U, Y1, V). The effect samples the pixel pair's texel and selects the pixel's
+        // channels by parity; no adjacent texel is needed.
+        SkASSERT(numPlanes == 1);
+        SkASSERT(yuvaProxies.yuvaInfo().subsampling() == SkYUVAInfo::Subsampling::k422);
+        SkISize planeDims[SkYUVAInfo::kMaxPlanes];
+        [[maybe_unused]] int numPlaneDims = yuvaProxies.yuvaInfo().planeDimensions(planeDims);
+        SkASSERT(numPlaneDims == 1);
+        SkASSERT(yuvaProxies.makeView(0).dimensions() == planeDims[0]);
+        // The matrix maps image space to plane space at full resolution; the shader halves the x
+        // coordinate to index the plane's texels.
+        packedPlaneMatrix = yuvaProxies.yuvaInfo().inverseOriginMatrix();
+        // The effect applies the subset and tile modes itself, in image space, before deriving the
+        // pixel parity. Left to the child, they would run on the half-resolution texel grid, where
+        // clamp and mirror can map a pixel onto the pair's other pixel.
+        packedSubset = subset ? *subset : SkRect::Make(yuvaProxies.yuvaInfo().dimensions());
+        packedWrapModes[0] = samplerState.wrapModeX();
+        packedWrapModes[1] = samplerState.wrapModeY();
+    }
+    // The packed plane child only fetches the texel the effect computed, which always lies within
+    // the plane. Mip levels would average neighboring pixel pairs, so the packed plane is always
+    // sampled from its base level.
+    GrSamplerState planeSamplerState = packedYUYV
+            ? GrSamplerState(GrSamplerState::WrapMode::kClamp,
+                             GrSamplerState::Filter::kNearest,
+                             GrSamplerState::MipmapMode::kNone)
+            : samplerState;
+
     bool usesBorder = samplerState.wrapModeX() == GrSamplerState::WrapMode::kClampToBorder ||
                       samplerState.wrapModeY() == GrSamplerState::WrapMode::kClampToBorder;
+    if (packedYUYV && usesBorder) {
+        // Clamp-to-border is not supported by the packed YUV shader. Reject it without asserting,
+        // since callers can request it through SkTileMode::kDecal.
+        return nullptr;
+    }
     float planeBorders[4][4] = {};
     if (usesBorder) {
         border_colors(yuvaProxies, planeBorders);
     }
 
     bool snap[2] = {false, false};
-    std::unique_ptr<GrFragmentProcessor> planeFPs[SkYUVAInfo::kMaxPlanes];
+    std::array<std::unique_ptr<GrFragmentProcessor>, SkYUVAInfo::kMaxPlanes> planeFPs;
     for (int i = 0; i < numPlanes; ++i) {
-        bool useSubset = SkToBool(subset);
+        bool useSubset = SkToBool(subset) && !packedYUYV;
         GrSurfaceProxyView view = yuvaProxies.makeView(i);
-        SkMatrix planeMatrix = yuvaProxies.yuvaInfo().inverseOriginMatrix();
+        SkMatrix planeMatrix = packedYUYV ? SkMatrix::I()
+                                          : yuvaProxies.yuvaInfo().inverseOriginMatrix();
         SkRect planeSubset;
         SkRect planeDomain;
         bool makeLinearWithSnap = false;
@@ -84,7 +129,7 @@ std::unique_ptr<GrFragmentProcessor> GrYUVtoRGBEffect::Make(const GrYUVATextureP
         SkASSERT(ssy > 0 && ssy <= 2);
         float scaleX = 1.f;
         float scaleY = 1.f;
-        if (ssx > 1 || ssy > 1) {
+        if ((ssx > 1 || ssy > 1) && !packedYUYV) {
             scaleX = 1.f/ssx;
             scaleY = 1.f/ssy;
             // We would want to add a translation to this matrix to handle other sitings.
@@ -177,7 +222,7 @@ std::unique_ptr<GrFragmentProcessor> GrYUVtoRGBEffect::Make(const GrYUVATextureP
                 planeFPs[i] = GrTextureEffect::MakeSubset(std::move(view),
                                                           kUnknown_SkAlphaType,
                                                           planeMatrix,
-                                                          samplerState,
+                                                          planeSamplerState,
                                                           planeSubset,
                                                           planeDomain,
                                                           caps,
@@ -186,13 +231,13 @@ std::unique_ptr<GrFragmentProcessor> GrYUVtoRGBEffect::Make(const GrYUVATextureP
                 planeFPs[i] = GrTextureEffect::MakeSubset(std::move(view),
                                                           kUnknown_SkAlphaType,
                                                           planeMatrix,
-                                                          samplerState,
+                                                          planeSamplerState,
                                                           planeSubset,
                                                           caps,
                                                           planeBorders[i]);
             }
         } else {
-            GrSamplerState planeSampler = samplerState;
+            GrSamplerState planeSampler = planeSamplerState;
             if (makeLinearWithSnap) {
                 planeSampler = GrSamplerState(samplerState.wrapModeX(),
                                               samplerState.wrapModeY(),
@@ -208,10 +253,14 @@ std::unique_ptr<GrFragmentProcessor> GrYUVtoRGBEffect::Make(const GrYUVATextureP
         }
     }
     std::unique_ptr<GrFragmentProcessor> fp(
-            new GrYUVtoRGBEffect(planeFPs,
+            new GrYUVtoRGBEffect(planeFPs.data(),
                                  numPlanes,
                                  yuvaProxies.yuvaLocations(),
                                  snap,
+                                 packedYUYV,
+                                 packedPlaneMatrix,
+                                 packedSubset,
+                                 packedWrapModes,
                                  yuvaProxies.yuvaInfo().yuvColorSpace()));
     return GrMatrixEffect::Make(localMatrix, std::move(fp));
 }
@@ -225,15 +274,24 @@ GrYUVtoRGBEffect::GrYUVtoRGBEffect(std::unique_ptr<GrFragmentProcessor> planeFPs
                                    int numPlanes,
                                    const SkYUVAInfo::YUVALocations& locations,
                                    const bool snap[2],
+                                   bool packedYUYV,
+                                   const SkMatrix& packedPlaneMatrix,
+                                   const SkRect& packedSubset,
+                                   const GrSamplerState::WrapMode packedWrapModes[2],
                                    SkYUVColorSpace yuvColorSpace)
         : GrFragmentProcessor(kGrYUVtoRGBEffect_ClassID,
                               ModulateForClampedSamplerOptFlags(alpha_type(locations)))
         , fLocations(locations)
-        , fYUVColorSpace(yuvColorSpace) {
+        , fYUVColorSpace(yuvColorSpace)
+        , fPackedYUYV(packedYUYV)
+        , fPackedPlaneMatrix(packedPlaneMatrix)
+        , fPackedSubset(packedSubset) {
     std::copy_n(snap, 2, fSnap);
+    std::copy_n(packedWrapModes, 2, fPackedWrapModes);
 
-    if (fSnap[0] || fSnap[1]) {
-        // Need this so that we can access coords in SKSL to perform snapping.
+    if (fSnap[0] || fSnap[1] || fPackedYUYV) {
+        // Need this so that we can access coords in SKSL to perform snapping or the
+        // pixel-parity-aware sampling of the packed 4:2:2 plane.
         this->setUsesSampleCoordsDirectly();
         for (int i = 0; i < numPlanes; ++i) {
             this->registerChild(std::move(planeFPs[i]), SkSL::SampleUsage::Explicit());
@@ -282,29 +340,118 @@ std::unique_ptr<GrFragmentProcessor::ProgramImpl> GrYUVtoRGBEffect::onMakeProgra
             fragBuilder->codeAppendf("half4 color;");
             const bool hasAlpha = yuvEffect.fLocations[SkYUVAInfo::YUVAChannels::kA].fPlane >= 0;
 
-            for (int planeIdx = 0; planeIdx < numPlanes; ++planeIdx) {
-                std::string colorChannel;
-                std::string planeChannel;
-                for (int locIdx = 0; locIdx < (hasAlpha ? 4 : 3); ++locIdx) {
-                    auto [yuvPlane, yuvChannel] = yuvEffect.fLocations[locIdx];
-                    if (yuvPlane == planeIdx) {
-                        colorChannel.push_back("rgba"[locIdx]);
-                        planeChannel.push_back("rgba"[static_cast<int>(yuvChannel)]);
+            if (yuvEffect.fPackedYUYV) {
+                // Sample coordinates are in image space with pixel centers at half-integers. Apply
+                // the subset and tile modes first, while the coords still address whole pixels: the
+                // pixel parity derived below must be that of the pixel the tile mode selects.
+                // Clamping past the right edge of an even-width image, for example, must repeat the
+                // last (odd) pixel rather than alternate between its pair's two pixels. The tiling
+                // matches GrTextureEffect's nearest-filter shader modes.
+                const char* subsetName;
+                fPackedSubsetVar = args.fUniformHandler->addUniform(
+                        &yuvEffect, kFragment_GrShaderFlag, SkSLType::kFloat4,
+                        "packedSubset", &subsetName);
+                fragBuilder->codeAppendf("float2 tiledCoord = %s;", args.fSampleCoord);
+                auto tile = [&](GrSamplerState::WrapMode mode,
+                                const char* coord,
+                                const char* start,
+                                const char* stop) {
+                    switch (mode) {
+                        case GrSamplerState::WrapMode::kClamp:
+                            // Done by the clamp to the subset's pixel centers.
+                            break;
+                        case GrSamplerState::WrapMode::kRepeat:
+                            fragBuilder->codeAppendf(
+                                    "tiledCoord.%s = mod(tiledCoord.%s - %s.%s, "
+                                                        "%s.%s - %s.%s) + %s.%s;",
+                                    coord, coord, subsetName, start,
+                                    subsetName, stop, subsetName, start, subsetName, start);
+                            break;
+                        case GrSamplerState::WrapMode::kMirrorRepeat:
+                            fragBuilder->codeAppendf(
+                                    "{"
+                                    "float w = %s.%s - %s.%s;"
+                                    "float w2 = 2 * w;"
+                                    "float m = mod(tiledCoord.%s - %s.%s, w2);"
+                                    "tiledCoord.%s = mix(m, w2 - m, step(w, m)) + %s.%s;"
+                                    "}",
+                                    subsetName, stop, subsetName, start,
+                                    coord, subsetName, start,
+                                    coord, subsetName, start);
+                            break;
+                        case GrSamplerState::WrapMode::kClampToBorder:
+                            SkUNREACHABLE;  // Rejected by Make().
+                    }
+                };
+                tile(yuvEffect.fPackedWrapModes[0], "x", "x", "z");
+                tile(yuvEffect.fPackedWrapModes[1], "y", "y", "w");
+                fragBuilder->codeAppendf(
+                        "tiledCoord = clamp(tiledCoord, floor(%s.xy) + 0.5, ceil(%s.zw) - 0.5);",
+                        subsetName, subsetName);
+                // The packed plane's texel parity runs along the plane's memory x-axis, which is
+                // the image space transformed by the encoded origin (a 90-degree origin rotation
+                // maps image x to plane y, so the parity would be computed on the wrong axis in
+                // image space). The plane child has an identity matrix, so apply the inverse-origin
+                // transform here before computing the pixel-parity sampling.
+                fPackedPlaneMatrixVar = args.fUniformHandler->addUniform(
+                        &yuvEffect, kFragment_GrShaderFlag, SkSLType::kFloat3x3,
+                        "packedPlaneMatrix");
+                fragBuilder->codeAppendf(
+                        "float2 planeCoord = (float3(tiledCoord, 1.0) * %s).xy;",
+                        args.fUniformHandler->getUniformCStr(fPackedPlaneMatrixVar));
+                // Sample coords arrive at pixel centers, so floor() gives the pixel's index along
+                // the plane's memory x-axis.
+                fragBuilder->codeAppendf(
+                        "float pixelIdx = floor(planeCoord.x);");
+                fragBuilder->codeAppendf(
+                        "bool odd = mod(pixelIdx, 2.0) > 0.5;");
+                // See PlaneConfig::kYUYV: the single plane is a 4-channel texture with one texel
+                // per 2x1 block of pixels, channels 0..3 hold (Y0, U, Y1, V). The locations for
+                // this config are fixed: Y is channel 0 (R) of the pair's texel, U is channel 1 (G)
+                // and V is channel 3 (A); odd pixels take their luma from channel 2 (B) instead.
+                SkASSERT(numPlanes == 1);
+                SkASSERT(yuvEffect.fLocations[SkYUVAInfo::YUVAChannels::kY].fChannel ==
+                                 SkColorChannel::kR);
+                SkASSERT(yuvEffect.fLocations[SkYUVAInfo::YUVAChannels::kU].fChannel ==
+                                 SkColorChannel::kG);
+                SkASSERT(yuvEffect.fLocations[SkYUVAInfo::YUVAChannels::kV].fChannel ==
+                                 SkColorChannel::kA);
+                // Halve the x coordinate to index the plane's texels, then snap to the pair's texel
+                // center for nearest filtering.
+                fragBuilder->codeAppendf(
+                        "float2 texelCenter = float2(floor(pixelIdx * 0.5) + 0.5, "
+                                                    "floor(planeCoord.y) + 0.5);");
+                fragBuilder->codeAppendf(
+                        "half4 s0 = %s;",
+                        this->invokeChild(0, args, "texelCenter").c_str());
+                fragBuilder->codeAppendf("color.r = odd ? s0.b : s0.r;");  // Y
+                fragBuilder->codeAppendf("color.g = s0.g;");  // U
+                fragBuilder->codeAppendf("color.b = s0.a;");  // V
+                fragBuilder->codeAppendf("color.a = 1.0;");
+            } else {
+                for (int planeIdx = 0; planeIdx < numPlanes; ++planeIdx) {
+                    std::string colorChannel;
+                    std::string planeChannel;
+                    for (int locIdx = 0; locIdx < (hasAlpha ? 4 : 3); ++locIdx) {
+                        auto [yuvPlane, yuvChannel] = yuvEffect.fLocations[locIdx];
+                        if (yuvPlane == planeIdx) {
+                            colorChannel.push_back("rgba"[locIdx]);
+                            planeChannel.push_back("rgba"[static_cast<int>(yuvChannel)]);
+                        }
+                    }
+
+                    SkASSERT(colorChannel.size() == planeChannel.size());
+                    if (!colorChannel.empty()) {
+                        fragBuilder->codeAppendf(
+                                "color.%s = (%s).%s;",
+                                colorChannel.c_str(),
+                                this->invokeChild(planeIdx, args, sampleCoords).c_str(),
+                                planeChannel.c_str());
                     }
                 }
-
-                SkASSERT(colorChannel.size() == planeChannel.size());
-                if (!colorChannel.empty()) {
-                    fragBuilder->codeAppendf(
-                            "color.%s = (%s).%s;",
-                            colorChannel.c_str(),
-                            this->invokeChild(planeIdx, args, sampleCoords).c_str(),
-                            planeChannel.c_str());
+                if (!hasAlpha) {
+                    fragBuilder->codeAppendf("color.a = 1;");
                 }
-            }
-
-            if (!hasAlpha) {
-                fragBuilder->codeAppendf("color.a = 1;");
             }
 
             if (kIdentity_SkYUVColorSpace != yuvEffect.fYUVColorSpace) {
@@ -348,10 +495,29 @@ std::unique_ptr<GrFragmentProcessor::ProgramImpl> GrYUVtoRGBEffect::onMakeProgra
                 pdman.setMatrix3f(fColorSpaceMatrixVar, mtx);
                 pdman.set3fv(fColorSpaceTranslateVar, 1, v);
             }
+            if (fPackedPlaneMatrixVar.isValid()) {
+                float mtx[9] = {
+                        yuvEffect.fPackedPlaneMatrix[SkMatrix::kMScaleX],
+                        yuvEffect.fPackedPlaneMatrix[SkMatrix::kMSkewX],
+                        yuvEffect.fPackedPlaneMatrix[SkMatrix::kMTransX],
+                        yuvEffect.fPackedPlaneMatrix[SkMatrix::kMSkewY],
+                        yuvEffect.fPackedPlaneMatrix[SkMatrix::kMScaleY],
+                        yuvEffect.fPackedPlaneMatrix[SkMatrix::kMTransY],
+                        0.f, 0.f, 1.f,
+                };
+                pdman.setMatrix3f(fPackedPlaneMatrixVar, mtx);
+            }
+            if (fPackedSubsetVar.isValid()) {
+                const SkRect& subset = yuvEffect.fPackedSubset;
+                pdman.set4f(fPackedSubsetVar,
+                            subset.fLeft, subset.fTop, subset.fRight, subset.fBottom);
+            }
         }
 
         UniformHandle fColorSpaceMatrixVar;
         UniformHandle fColorSpaceTranslateVar;
+        UniformHandle fPackedPlaneMatrixVar;
+        UniformHandle fPackedSubsetVar;
     };
 
     return std::make_unique<Impl>();
@@ -380,6 +546,12 @@ void GrYUVtoRGBEffect::onAddToKey(const GrShaderCaps& caps, skgpu::KeyBuilder* b
     if (fSnap[1]) {
         packed |= 1 << 18;
     }
+    if (fPackedYUYV) {
+        packed |= 1 << 19;
+        static_assert(GrSamplerState::kWrapModeCount <= 4);
+        packed |= static_cast<uint32_t>(fPackedWrapModes[0]) << 20;
+        packed |= static_cast<uint32_t>(fPackedWrapModes[1]) << 22;
+    }
     b->add32(packed);
 }
 
@@ -388,14 +560,22 @@ bool GrYUVtoRGBEffect::onIsEqual(const GrFragmentProcessor& other) const {
 
     return fLocations == that.fLocations            &&
            std::equal(fSnap, fSnap + 2, that.fSnap) &&
-           fYUVColorSpace == that.fYUVColorSpace;
+           fYUVColorSpace == that.fYUVColorSpace    &&
+           fPackedYUYV == that.fPackedYUYV          &&
+           fPackedPlaneMatrix == that.fPackedPlaneMatrix &&
+           fPackedSubset == that.fPackedSubset      &&
+           std::equal(fPackedWrapModes, fPackedWrapModes + 2, that.fPackedWrapModes);
 }
 
 GrYUVtoRGBEffect::GrYUVtoRGBEffect(const GrYUVtoRGBEffect& src)
         : GrFragmentProcessor(src)
         , fLocations((src.fLocations))
-        , fYUVColorSpace(src.fYUVColorSpace) {
+        , fYUVColorSpace(src.fYUVColorSpace)
+        , fPackedYUYV(src.fPackedYUYV)
+        , fPackedPlaneMatrix(src.fPackedPlaneMatrix)
+        , fPackedSubset(src.fPackedSubset) {
     std::copy_n(src.fSnap, 2, fSnap);
+    std::copy_n(src.fPackedWrapModes, 2, fPackedWrapModes);
 }
 
 std::unique_ptr<GrFragmentProcessor> GrYUVtoRGBEffect::clone() const {

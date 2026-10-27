@@ -70,18 +70,13 @@ bool MtlCommandBuffer::createNewMTLCommandBuffer() {
     // Inserting a pool here so the autorelease occurs when we return and the
     // only remaining ref is the retain below.
     @autoreleasepool {
-        if (@available(macOS 11.0, iOS 14.0, tvOS 14.0, *)) {
-            sk_cfp<MTLCommandBufferDescriptor*> desc([[MTLCommandBufferDescriptor alloc] init]);
-            (*desc).retainedReferences = NO;
+        sk_cfp<MTLCommandBufferDescriptor*> desc([[MTLCommandBufferDescriptor alloc] init]);
+        (*desc).retainedReferences = NO;
 #ifdef SK_ENABLE_MTL_DEBUG_INFO
-            (*desc).errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
+        (*desc).errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
 #endif
-            // We add a retain here because the command buffer is set to autorelease (not alloc or copy)
-            fCommandBuffer.reset([[fQueue commandBufferWithDescriptor:desc.get()] retain]);
-        } else {
-            // We add a retain here because the command buffer is set to autorelease (not alloc or copy)
-            fCommandBuffer.reset([[fQueue commandBufferWithUnretainedReferences] retain]);
-        }
+        // We add a retain here because the command buffer is set to autorelease (not alloc or copy)
+        fCommandBuffer.reset([[fQueue commandBufferWithDescriptor:desc.get()] retain]);
     }
     return fCommandBuffer != nil;
 }
@@ -109,6 +104,7 @@ void MtlCommandBuffer::onResetCommandBuffer() {
     fActiveGraphicsPipeline = nullptr;
     fBoundUniformBuffers = {};
     fBoundUniformBuffersDirty = false;
+    fBoundStorageFallbackTexture = nullptr;
     fCurrentIndexBuffer = nil;
     fCurrentIndexBufferOffset = 0;
 }
@@ -345,6 +341,7 @@ void MtlCommandBuffer::endRenderPass() {
     fActiveGraphicsPipeline = nullptr;
     fBoundUniformBuffers = {};
     fBoundUniformBuffersDirty = false;
+    fBoundStorageFallbackTexture = nullptr;
     fDrawIsOffscreen = false;
 }
 
@@ -358,14 +355,18 @@ bool MtlCommandBuffer::addDrawPass(DrawPass* drawPass) {
         return true;
     }
 
-    // If there is storage buffer data to bind, it must be done prior to draws.
-    if (drawPass->storageBufferInfo().fBuffer != nullptr) {
-        this->bindUniformBuffer(drawPass->storageBufferInfo(),
-                                UniformSlot::kStorage);
-    }
-
     if (!drawPass->addResourceRefs(fResourceProvider, this)) SK_UNLIKELY {
         return false;
+    }
+
+    // If there is storage data to bind, it must be done prior to draws; otherwise clear the slot so
+    // state from a prior DrawPass in the same RenderPass does not leak.
+    if (fSharedContext->caps()->storageBufferSupport()) {
+        this->bindUniformBuffer(drawPass->storageBufferInfo(), UniformSlot::kStorage);
+    } else {
+        const TextureProxy* proxy = drawPass->storageFallbackTexture();
+        fBoundStorageFallbackTexture = proxy ? proxy->texture() : nullptr;
+        fBoundUniformBuffersDirty = true;
     }
 
     for (auto[type, cmdPtr] : drawPass->commands()) {
@@ -586,6 +587,26 @@ void MtlCommandBuffer::bindUniformBuffers() {
             if (fActiveGraphicsPipeline->fsUsesStorage()) {
                 fActiveRenderCommandEncoder->setFragmentBuffer(
                         mtlBuffer, storageInfo.fOffset, MtlGraphicsPipeline::kStorageBufferIndex);
+            }
+        } else if (fBoundStorageFallbackTexture) {
+            id<MTLTexture> mtlTexture =
+                    static_cast<const MtlTexture*>(fBoundStorageFallbackTexture)->mtlTexture();
+            if (fActiveGraphicsPipeline->vsUsesStorage()) {
+                fActiveRenderCommandEncoder->setVertexTexture(
+                        mtlTexture, MtlGraphicsPipeline::kStorageBufferIndex);
+            }
+            if (fActiveGraphicsPipeline->fsUsesStorage()) {
+                fActiveRenderCommandEncoder->setFragmentTexture(
+                        mtlTexture, MtlGraphicsPipeline::kStorageBufferIndex);
+            }
+        } else {
+            if (fActiveGraphicsPipeline->vsUsesStorage()) {
+                fActiveRenderCommandEncoder->setVertexTexture(
+                        nil, MtlGraphicsPipeline::kStorageBufferIndex);
+            }
+            if (fActiveGraphicsPipeline->fsUsesStorage()) {
+                fActiveRenderCommandEncoder->setFragmentTexture(
+                        nil, MtlGraphicsPipeline::kStorageBufferIndex);
             }
         }
     }

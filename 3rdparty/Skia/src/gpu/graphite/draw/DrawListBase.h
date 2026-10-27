@@ -9,17 +9,18 @@
 
 #include "include/gpu/graphite/GraphiteTypes.h"
 
+#include "include/private/SkAttributes.h"
 #include "include/private/SkDebug.h"
 #include "include/private/SkEnumBitMask.h"
 #include "src/core/SkBlockAllocator.h"
 #include "src/core/SkTBlockList.h"
 #include "src/gpu/graphite/ContextUtils.h"
 #include "src/gpu/graphite/DrawCommands.h"
-#include "src/gpu/graphite/DrawOrder.h"
-#include "src/gpu/graphite/DrawParams.h"
 #include "src/gpu/graphite/PaintParams.h"
 #include "src/gpu/graphite/PipelineData.h"
 #include "src/gpu/graphite/StorageContext.h"
+#include "src/gpu/graphite/draw/DrawOrder.h"
+#include "src/gpu/graphite/draw/DrawParams.h"
 #include "src/gpu/graphite/geom/Rect.h"
 #include "src/gpu/graphite/geom/Transform.h"
 
@@ -31,10 +32,11 @@
 
 namespace skgpu::graphite {
 
+class DrawContext;
 class DrawPass;
 class Geometry;
-class Renderer;
 class Recorder;
+class Renderer;
 
 struct Layer;
 
@@ -69,6 +71,7 @@ public:
 
     virtual std::unique_ptr<DrawPass> snapDrawPass(Recorder* recorder,
                                                    StorageContext* storageContext,
+                                                   DrawContext* drawContext,
                                                    sk_sp<TextureProxy> target,
                                                    const SkImageInfo& targetInfo,
                                                    const DstReadStrategy dstReadStrategy) = 0;
@@ -270,8 +273,12 @@ protected:
 
             for (int i = 0; i < binding.numTextures(); ++i) {
                 auto [t, s] = binding.texture(i);
-                textures[i] = t.get();
-                samplers[i] = s;
+                // SAFETY: `textures` and `samplers` were allocated with `binding.numTextures()`
+                // elements by `bindDeferredTexturesAndSamplers()` above.
+                SK_UNSAFE_BUFFERS({
+                    textures[i] = t.get();
+                    samplers[i] = s;
+                })
             }
         }
 

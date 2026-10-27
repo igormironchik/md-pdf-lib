@@ -101,6 +101,18 @@
 // To use smaller but slower mipmap builder
 //#define SK_USE_DRAWING_MIPMAP_DOWNSAMPLER
 
+/*  Ganesh allocates GrProcessors from a single process-global memory pool, which is normally
+    protected by a spinlock because multiple GrDirectContexts may allocate from it concurrently
+    on different threads. A client that can guarantee that at most one GrDirectContext is in use
+    in the process at any time may define this to elide that lock.
+
+    This is a whole-process guarantee, not a per-library one: if any other code in the process
+    (e.g. a second library that statically links Skia) uses its own GrDirectContext concurrently,
+    the pool can be corrupted, typically manifesting as a crash while walking a GrProcessor's
+    vtable.
+*/
+//#define SK_ASSUME_SINGLE_GANESH_CONTEXT
+
 /* Skia tries to make use of some non-standard C++ language extensions.
    By default, Skia provides msvc and clang/gcc versions of these macros.
    Skia consumers can provide their own definitions of these macros to
@@ -137,5 +149,11 @@
  */
 // #define SKVX_DISABLE_SIMD
 // #define SKRP_CPU_SCALAR
+
+/*
+ * By default, Graphite uses a std::function-based SkExecutor. This define can
+ * be used to switch it to be a callback-based SkExecutor.
+ */
+// #define SK_GRAPHITE_USE_CALLBACK_EXECUTOR
 
 #endif

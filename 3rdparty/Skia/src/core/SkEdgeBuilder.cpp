@@ -13,6 +13,7 @@
 #include "include/private/SkDebug.h"
 #include "include/private/SkFixed.h"
 #include "include/private/SkFloatingPoint.h"
+#include "include/private/SkOnlyStackAllocatable.h"
 #include "include/private/SkSafe32.h"
 #include "src/core/SkAnalyticEdge.h"
 #include "src/core/SkEdge.h"
@@ -39,6 +40,9 @@ SkEdgeBuilder::Combine SkBasicEdgeBuilder::combineVertical(const SkEdge* edge, S
             last->fLastY = edge->fLastY;
             return kPartial_Combine;
         }
+        return kNo_Combine;
+    }
+    if (!fCanCullToTheRight) {
         return kNo_Combine;
     }
     if (edge->fFirstY == last->fFirstY) {
@@ -88,6 +92,9 @@ SkEdgeBuilder::Combine SkAnalyticEdgeBuilder::combineVertical(const SkAnalyticEd
             last->fLowerY = edge->fLowerY;
             return kPartial_Combine;
         }
+        return kNo_Combine;
+    }
+    if (!fCanCullToTheRight) {
         return kNo_Combine;
     }
     if (approximately_equal(edge->fUpperY, last->fUpperY)) {
@@ -273,6 +280,8 @@ int SkEdgeBuilder::build(const SkPathRaw& raw, const SkIRect* iclip, bool canCul
     if (iclip) {
         SkRect clip = this->recoverClip(*iclip);
         struct Rec {
+            SK_ONLY_STACK_ALLOCATABLE;
+
             SkEdgeBuilder* fBuilder;
             bool           fIsFinite;
         } rec = { this, true };
@@ -349,6 +358,7 @@ int SkEdgeBuilder::buildEdges(const SkPathRaw& raw,
                               const SkIRect* shiftedClip) {
     // If we're convex, then we need both edges, even if the right edge is past the clip.
     const bool canCullToTheRight = !raw.isKnownToBeConvex();
+    fCanCullToTheRight = canCullToTheRight;
 
     // We can use our buildPoly() optimization if all the segments are lines.
     // (Edges are homogeneous and stored contiguously in memory, no need for indirection.)

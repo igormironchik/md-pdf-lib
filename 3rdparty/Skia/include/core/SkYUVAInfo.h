@@ -61,14 +61,28 @@ public:
         kYUVA,     ///< Plane 0: YUVA
         kUYVA,     ///< Plane 0: UYVA
 
+#if defined(SK_ENABLE_YUVA_PACKED_422)
+        /**
+         * Plane 0: YUYV. Packed 4:2:2 where the plane has one 4-channel texel per 2x1 block of
+         * pixels: channels 0..3 hold (Y0, U0, Y1, V0) for the pixel pair (Y0, Y1), (Y2, Y3), and so
+         * on. Only valid with Subsampling::k422. The plane has half the image's horizontal texel
+         * dimensions; the texture must be viewed as a 4-channel 16-bit format. The image's memory
+         * width (its height if the origin swaps width and height) must be even.
+         */
+        kYUYV,
+
+        kLast = kYUYV
+#else
         kLast = kUYVA
+#endif
     };
 
     /**
      * UV subsampling is also specified in the enum value names using J:a:b notation (e.g. 4:2:0 is
      * 1/2 horizontal and 1/2 vertical resolution for U and V). If alpha is present it is not sub-
      * sampled. Note that Subsampling values other than k444 are only valid with PlaneConfig values
-     * that have U and V in different planes than Y (and A, if present).
+     * that have U and V in different planes than Y (and A, if present), with the exception of
+     * PlaneConfig::kYUYV which represents packed 4:2:2 and is only valid with Subsampling::k422.
      */
     enum class Subsampling {
         kUnknown,
@@ -268,6 +282,9 @@ constexpr int SkYUVAInfo::NumPlanes(PlaneConfig planeConfig) {
         case PlaneConfig::kY_VU_A:  return 3;
         case PlaneConfig::kYUVA:    return 1;
         case PlaneConfig::kUYVA:    return 1;
+#if defined(SK_ENABLE_YUVA_PACKED_422)
+        case PlaneConfig::kYUYV:    return 1;
+#endif
     }
     SkUNREACHABLE;
 }
@@ -304,6 +321,12 @@ constexpr int SkYUVAInfo::NumChannelsInPlane(PlaneConfig config, int i) {
         case SkYUVAInfo::PlaneConfig::kYUVA:
         case SkYUVAInfo::PlaneConfig::kUYVA:
             return i == 0 ? 4 : 0;
+#if defined(SK_ENABLE_YUVA_PACKED_422)
+        case SkYUVAInfo::PlaneConfig::kYUYV:
+            // All four YUVA channels of the pixel pair are read from each 4-channel texel (see
+            // kYUYV docs).
+            return i == 0 ? 4 : 0;
+#endif
     }
     return 0;
 }

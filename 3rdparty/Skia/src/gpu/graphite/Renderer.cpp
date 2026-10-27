@@ -7,8 +7,8 @@
 
 #include "src/gpu/graphite/Renderer.h"
 
-#include "src/gpu/graphite/DrawParams.h"
 #include "src/gpu/graphite/UniformManager.h"
+#include "src/gpu/graphite/draw/DrawParams.h"
 
 namespace skgpu::graphite {
 
@@ -17,7 +17,7 @@ RenderStep::RenderStep(Layout layout,
                        SkEnumBitMask<Flags> flags,
                        std::initializer_list<Uniform> uniforms,
                        PrimitiveType primitiveType,
-                       DepthStencilSettings depthStencilSettings,
+                       StencilSettings stencilSettings,
                        SkSpan<const Attribute> staticAttrs,
                        SkSpan<const Attribute> appendAttrs,
                        SkSpan<const Uniform> storageUniforms,
@@ -30,7 +30,7 @@ RenderStep::RenderStep(Layout layout,
                   (SkToBool(flags & Flags::kFsUsesStorage) ? PipelineStageFlags::kFragmentShader
                                                            : PipelineStageFlags{}))
         , fPrimitiveType(primitiveType)
-        , fDepthStencilSettings(depthStencilSettings)
+        , fStencilSettings(stencilSettings)
         , fUniforms(uniforms)
         , fStaticAttrs(staticAttrs.begin(), staticAttrs.end())
         , fAppendAttrs(appendAttrs.begin(), appendAttrs.end())
@@ -41,9 +41,15 @@ RenderStep::RenderStep(Layout layout,
         , fAppendDataStride(0)
         , fStorageUniformStride(0)
         , fStorageUniformAlignment(1) {
+    // If declaring storage uniforms, the flags must specify their visibility
     SkASSERT(fStorageUniforms.empty() ||
              SkToBool(fStorageBufferStages & (PipelineStageFlags::kVertexShader |
                                               PipelineStageFlags::kFragmentShader)));
+
+    // kAllowSelfIntersection and kNoSelfIntersection are mutually exclusive
+    SkASSERT(!(SkToBool(fFlags & Flags::kAllowsSelfIntersection) &&
+               SkToBool(fFlags & Flags::kNoSelfIntersections)));
+
     for (auto v : this->staticAttributes()) {
         fStaticDataStride += v.sizeAlign4();
     }

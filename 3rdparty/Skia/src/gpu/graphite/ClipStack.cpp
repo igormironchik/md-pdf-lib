@@ -19,9 +19,11 @@
 #include "include/core/SkSpan.h"
 #include "include/core/SkStrokeRec.h"
 #include "include/gpu/graphite/Recorder.h"
+#include "include/private/SkAttributes.h"
 #include "include/private/SkDebug.h"
 #include "include/private/SkEnumBitMask.h"
 #include "include/private/SkFloatingPoint.h"
+#include "include/private/SkOnlyStackAllocatable.h"
 #include "src/core/SkPathPriv.h"
 #include "src/core/SkRRectPriv.h"
 #include "src/core/SkRectPriv.h"
@@ -29,10 +31,10 @@
 #include "src/gpu/graphite/AtlasProvider.h"
 #include "src/gpu/graphite/ClipAtlasManager.h"
 #include "src/gpu/graphite/Device.h"
-#include "src/gpu/graphite/DrawParams.h"
 #include "src/gpu/graphite/RecorderPriv.h"
 #include "src/gpu/graphite/RendererProvider.h"
 #include "src/gpu/graphite/TextureProxy.h"
+#include "src/gpu/graphite/draw/DrawParams.h"
 #include "src/gpu/graphite/geom/BoundsManager.h"
 #include "src/gpu/graphite/geom/EdgeAAQuad.h"
 #include "src/gpu/graphite/geom/Geometry.h"
@@ -327,6 +329,7 @@ Rect snap_scissor(const Rect& a, const Rect& deviceBounds) {
 // interact with each other, without needing to share a base class, friend each other, or have a
 // template for each combination of two types.
 struct ClipStack::TransformedShape {
+    SK_ONLY_STACK_ALLOCATABLE;
     const Transform& fLocalToDevice;
     const Shape&     fShape;
     const Rect&      fOuterBounds;
@@ -425,13 +428,14 @@ bool ClipStack::TransformedShape::contains(const TransformedShape& o) const {
         fLocalToDevice.inverseMapPoints(deviceQuad, localQuad, 4);
         for (int i = 0; i < 4; ++i) {
             // TODO: Would be nice to make this consistent with how the GPU clips NDC w.
-            if (deviceQuad[i].w < SkPathPriv::kW0PlaneDistance ||
-                localQuad[i].w < SkPathPriv::kW0PlaneDistance) {
+            if (SK_UNSAFE_TODO(deviceQuad[i].w < SkPathPriv::kW0PlaneDistance) ||
+                SK_UNSAFE_TODO(localQuad[i].w < SkPathPriv::kW0PlaneDistance)) {
                 // Something in O actually projects behind the W = 0 plane and would be clipped
                 // to infinity, so it's extremely unlikely that this contains O.
                 return false;
             }
-            if (!fShape.conservativeContains(skvx::float2::Load(localQuad + i) / localQuad[i].w)) {
+            if (SK_UNSAFE_TODO(!fShape.conservativeContains(skvx::float2::Load(localQuad + i) /
+                                                            localQuad[i].w))) {
                 return false;
             }
         }
@@ -1370,18 +1374,8 @@ bool ClipStack::DrawShape::applyStyle(const SkStrokeRec& style, const Rect& devi
         // SkStrokeRec::GetInflationRadius() returns a device-space inflation for hairlines.
         float localOutset = 0.f;
         if (!style.isFillStyle() && !style.isHairlineStyle()) {
-            // Rectangles, rounded rectangles, and lines do not produce miters so don't count the
-            // pessimistic limit against their draw bounds.
-            const float effectiveMiterLimit = fShape.isPath() ? style.getMiter() : 1.f;
-            // Rectangles and rounded rectangles don't have caps, so don't count that against their
-            // draw bounds (if we could efficiently know a path was a closed contour, it could
-            // be included here too).
-            const SkPaint::Cap effectiveCap = fShape.isRect() || fShape.isRRect()
-                    ? SkPaint::kButt_Cap : style.getCap();
-            localOutset = SkStrokeRec::GetInflationRadius(style.getJoin(),
-                                                          effectiveMiterLimit,
-                                                          effectiveCap,
-                                                          style.getWidth());
+            localOutset = fShape.getInflationRadius(
+                    style.getJoin(), style.getMiter(), style.getCap(), style.getWidth());
         }
 
         if (style.isHairlineStyle() ||
@@ -1950,9 +1944,13 @@ Clip ClipStack::visitClipStackForDraw(const Transform& localToDevice,
     // If there is no MSAA supported, rasterize any remaining elements by flattening them
     // into a single mask and storing in an atlas. Otherwise these will be handled by
     // Device::drawClip().
-    ClipAtlasManager* clipAtlas =
-            fDevice->recorder()->priv().atlasProvider()->getClipAtlasManager();
-    if (clipAtlas && !outEffectiveElements->empty()) {
+    ClipAtlasManager* clipAtlas = nullptr;
+    // Avoid lazily creating the AtlasProvider if there are no clip elements to atlas.
+    if (!outEffectiveElements->empty()) {
+        clipAtlas = fDevice->recorder()->priv().getOrCreateAtlasProvider()
+                            ->getClipAtlasManager();
+    }
+    if (clipAtlas) {
         AtlasClip* atlasClip = &nonMSAAClip.fAtlasClip;
 
         SkIRect iMaskBounds = cs.outerBounds().makeRoundOut().asSkIRect();

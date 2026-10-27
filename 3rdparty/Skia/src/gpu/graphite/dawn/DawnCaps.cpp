@@ -15,6 +15,7 @@
 #include "include/gpu/graphite/TextureInfo.h"
 #include "include/gpu/graphite/dawn/DawnBackendContext.h"
 #include "include/gpu/graphite/dawn/DawnGraphiteTypes.h"
+#include "include/private/SkAttributes.h"
 #include "src/gpu/SwizzlePriv.h"
 #include "src/gpu/graphite/ComputePipelineDesc.h"
 #include "src/gpu/graphite/GraphicsPipelineDesc.h"
@@ -352,6 +353,9 @@ void DawnCaps::initCaps(const DawnBackendContext& backendContext, const ContextO
     fResourceBindingReqs.fCombinedUniformBufferBinding =
             DawnGraphicsPipeline::kCombinedUniformIndex;
     fResourceBindingReqs.fStorageBufferBinding = DawnGraphicsPipeline::kStorageBufferIndex;
+    fResourceBindingReqs.fMaxStorageBufferBytes = SkTo<int>(
+            std::min<uint64_t>(limits.maxStorageBufferBindingSize,
+                               ResourceBindingRequirements::kDefaultMaxStorageBufferBytes));
 
 #if !defined(__EMSCRIPTEN__)
     // We need at least 4 SSBOs for intrinsic, render step, paint & gradient buffers.
@@ -399,7 +403,10 @@ void DawnCaps::initCaps(const DawnBackendContext& backendContext, const ContextO
         fSupportedResolveTextureLoadOp = wgpu::LoadOp::ExpandResolveTexture;
         fSupportsPartialLoadResolve =
                 backendContext.fDevice.HasFeature(wgpu::FeatureName::DawnPartialLoadResolveTexture);
-        fDifferentResolveAttachmentSizeSupport = fSupportsPartialLoadResolve;
+        if (fSupportsPartialLoadResolve) {
+            // This extension allows the MSAA attachments to be smaller than the main target.
+            fAttachmentSizePolicy = AttachmentSizePolicy::kMSAARenderArea;
+        }
     }
 
     fSupportsRenderPassRenderArea =
@@ -415,9 +422,10 @@ void DawnCaps::initCaps(const DawnBackendContext& backendContext, const ContextO
         fSupportedTransientAttachmentUsage == wgpu::TextureUsage::None) {
         // If the device doesn't support partial resolve nor transient attachments, we will emulate
         // load/resolve using separate render passes. This helps reuse MSAA textures better to
-        // reduce memory usage.
+        // reduce memory usage. Since they are separate render passes, there is no more requirement
+        // for the auxiliary attachments to match the main target's dimensions.
         fEmulateLoadStoreResolve = true;
-        fDifferentResolveAttachmentSizeSupport = true;
+        fAttachmentSizePolicy = AttachmentSizePolicy::kMSAARenderArea;
 
         // On hardware that doesn't support transient attachments or partial resolve, we
         // force-disable the ExpandResolveTexture loadOp. This is done because, under emulation,
@@ -479,6 +487,42 @@ void DawnCaps::initShaderCaps(const wgpu::Device& device) {
 #if !defined(__EMSCRIPTEN__)
     if (device.HasFeature(wgpu::FeatureName::FramebufferFetch)) {
         shaderCaps->fFBFetchSupport = true;
+    }
+#endif
+
+    // Dawn only exposes Subgroups when vote, ballot, shuffle, and arithmetic operations are all
+    // available in compute, which matches what fSubgroupSupport promises. The client must request
+    // the feature when creating the device.
+    //
+    // sk_SubgroupID lowers to @builtin(subgroup_id), which additionally needs the subgroup_id WGSL
+    // language feature. It has shipped but can be disabled by a killswitch, so check for it. The
+    // Emscripten bindings Skia builds against can't query it, so subgroups stay disabled there.
+#if !defined(__EMSCRIPTEN__)
+    if (device.HasFeature(wgpu::FeatureName::Subgroups) &&
+        device.GetAdapter().GetInstance().HasWGSLLanguageFeature(
+                wgpu::WGSLLanguageFeatureName::SubgroupId)) {
+        shaderCaps->fSubgroupSupport = true;
+    }
+#endif
+
+    // WebGPU cannot query or request maximal reconvergence. Maximal reconvergence can be toggled
+    // directly through dawn native, but currently dawn does not distinguish between maximal
+    // reconvergence and subgroup uniformity control. In the future these will be differentiated in
+    // dawn, and chromium will attempt to toggle maximal reconvergence.
+    //
+    // For backends other than Vulkan:
+    // - D3D12: HLSL's wave model requires the active lanes to exactly match the programmer's view
+    //   of flow control (https://github.com/microsoft/DirectXShaderCompiler/wiki/Wave-Intrinsics).
+    //   Dawn requires DXC for subgroups on D3D12.
+    // - Metal: assumed, as in MtlCaps.
+    // WASM can't query the backend, so compute shaders there force reconvergence with barriers.
+    shaderCaps->fSubgroupMaximalReconvergence = false;
+#if !defined(__EMSCRIPTEN__)
+    if (shaderCaps->fSubgroupSupport) {
+        wgpu::AdapterInfo info;
+        device.GetAdapter().GetInfo(&info);
+        shaderCaps->fSubgroupMaximalReconvergence = info.backendType == wgpu::BackendType::D3D12 ||
+                                                    info.backendType == wgpu::BackendType::Metal;
     }
 #endif
 }
@@ -574,9 +618,10 @@ bool DawnCaps::extractGraphicsDescs(const UniqueKey& key,
     SkASSERT(RenderStep::IsValidRenderStepID(rawKeyData[0]));
     RenderStep::RenderStepID renderStepID = static_cast<RenderStep::RenderStepID>(rawKeyData[0]);
 
-    *pipelineDesc = GraphicsPipelineDesc(renderStepID, UniquePaintParamsID(rawKeyData[1]));
+    *pipelineDesc =
+            GraphicsPipelineDesc(renderStepID, UniquePaintParamsID(SK_UNSAFE_TODO(rawKeyData[1])));
 
-    const uint32_t rpDescBits = rawKeyData[2];
+    const uint32_t rpDescBits = SK_UNSAFE_TODO(rawKeyData[2]);
     TextureFormat colorFormat =
             static_cast<TextureFormat>((rpDescBits >> kColorFormatOffset) & kFormatMask);
     SampleCount colorSamples =
@@ -620,7 +665,7 @@ bool DawnCaps::extractGraphicsDescs(const UniqueKey& key,
     }
 
     renderPassDesc->fSampleCount = colorSamples;
-    renderPassDesc->fWriteSwizzle = SwizzleCtorAccessor::Make(rawKeyData[3]);
+    renderPassDesc->fWriteSwizzle = SK_UNSAFE_TODO(SwizzleCtorAccessor::Make(rawKeyData[3]));
     renderPassDesc->fDstReadStrategy = this->getDstReadStrategy();
 
     return true;

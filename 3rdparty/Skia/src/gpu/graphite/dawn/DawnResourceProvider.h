@@ -14,15 +14,16 @@
 #include "src/core/SkTHash.h"
 #include "src/gpu/graphite/PipelineData.h"
 #include "src/gpu/graphite/ResourceProvider.h"
+#include "src/partition_alloc/raw_ptr.h"
 
 namespace skgpu::graphite {
 
+class DawnBuffer;
+class DawnCommandBuffer;
 class DawnGraphicsPipeline;
 class DawnSampler;
 class DawnSharedContext;
 class DawnTexture;
-class DawnBuffer;
-class DawnCommandBuffer;
 
 class DawnResourceProvider final : public ResourceProvider {
 public:
@@ -84,6 +85,7 @@ public:
     // For BindGroupEntries, using this method to get a null buffer pointer rather than simply using
     // nullptr allows for assigning a label (when enabled in Caps) for more clear debugging.
     const wgpu::Buffer& getOrCreateNullBuffer();
+    const wgpu::TextureView& getOrCreateNullTextureView();
 
 private:
     sk_sp<ComputePipeline> createComputePipeline(const ComputePipelineDesc&) override;
@@ -108,12 +110,13 @@ private:
     skia_private::THashMap<uint32_t, wgpu::RenderPipeline> fBlitWithDrawPipelines;
 
     wgpu::Buffer fNullBuffer;
+    wgpu::TextureView fNullTextureView;
 
     class IntrinsicBuffer;
     class IntrinsicConstantsManager;
     std::unique_ptr<IntrinsicConstantsManager> fIntrinsicConstantsManager;
 
-    SingleOwner* fSingleOwner = nullptr;
+    raw_ptr<SingleOwner> fSingleOwner = nullptr;
 };
 
 }  // namespace skgpu::graphite

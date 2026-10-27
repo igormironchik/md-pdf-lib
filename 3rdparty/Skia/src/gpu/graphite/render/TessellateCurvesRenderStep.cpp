@@ -11,6 +11,7 @@
 #include "include/core/SkPathTypes.h"
 #include "include/core/SkSpan.h"
 #include "include/private/SkAssert.h"
+#include "include/private/SkAttributes.h"
 #include "include/private/SkDebug.h"
 #include "include/private/SkEnumBitMask.h"
 #include "src/core/SkPathPriv.h"
@@ -18,10 +19,10 @@
 #include "src/gpu/BufferWriter.h"
 #include "src/gpu/graphite/Attribute.h"
 #include "src/gpu/graphite/BufferManager.h"
-#include "src/gpu/graphite/DrawOrder.h"
-#include "src/gpu/graphite/DrawParams.h"
 #include "src/gpu/graphite/DrawTypes.h"
 #include "src/gpu/graphite/PipelineData.h"
+#include "src/gpu/graphite/draw/DrawOrder.h"
+#include "src/gpu/graphite/draw/DrawParams.h"
 #include "src/gpu/graphite/geom/Geometry.h"
 #include "src/gpu/graphite/geom/Shape.h"
 #include "src/gpu/graphite/geom/Transform.h"
@@ -77,6 +78,8 @@ static constexpr SkSpan<const Attribute> kAttributes[2] = {kAttributesWithCurveT
 
 }  // namespace
 
+// NOTE: This step doesn't perform shading and self-intersections are resolved by modifying the
+// stencil buffer, so Flags::kAllowSelfIntersection is added.
 TessellateCurvesRenderStep::TessellateCurvesRenderStep(Layout layout,
                                                        bool evenOdd,
                                                        bool infinitySupport,
@@ -84,15 +87,15 @@ TessellateCurvesRenderStep::TessellateCurvesRenderStep(Layout layout,
         : RenderStep(layout,
                      evenOdd ? RenderStepID::kTessellateCurves_EvenOdd
                              : RenderStepID::kTessellateCurves_Winding,
-                     Flags::kRequiresMSAA |
-                     Flags::kAppendDynamicInstances |
-                     Flags::kIgnoreInverseFill,
+                     Flags::kRequiresMSAA | Flags::kAppendDynamicInstances
+                                          | Flags::kIgnoreInverseFill
+                                          | Flags::kAllowsSelfIntersection,
                      /*uniforms=*/{{"localToDevice", SkSLType::kFloat4x4}},
                      PrimitiveType::kTriangles,
                      evenOdd ? kEvenOddStencilPass : kWindingStencilPass,
                      /*staticAttrs=*/{{{"resolveLevel_and_idx",
-                                       VertexAttribType::kFloat2, SkSLType::kFloat2}}},
-                     /*appendAttrs=*/kAttributes[infinitySupport],
+                                        VertexAttribType::kFloat2, SkSLType::kFloat2}}},
+                     /*appendAttrs=*/SK_UNSAFE_TODO(kAttributes[infinitySupport]),
                      /*storageUniforms=*/{})
         , fInfinitySupport(infinitySupport) {
     // Initialize the static buffers we'll use when recording draw calls.
@@ -116,7 +119,7 @@ TessellateCurvesRenderStep::TessellateCurvesRenderStep(Layout layout,
 TessellateCurvesRenderStep::~TessellateCurvesRenderStep() {}
 
 std::string TessellateCurvesRenderStep::vertexSkSL(const RootNodesInfo&) const {
-    return SkSL::String::printf(
+    return SK_UNSAFE_TODO(SkSL::String::printf(
             // TODO: Approximate perspective scaling to match how PatchWriter is configured (or
             // provide explicit tessellation level in instance data instead of replicating
             // work).
@@ -126,7 +129,7 @@ std::string TessellateCurvesRenderStep::vertexSkSL(const RootNodesInfo&) const {
             "float4 devPosition = localToDevice * float4(localCoord, 0.0, 1.0);\n"
             "devPosition.z = depth;\n"
             "stepLocalCoords = localCoord;\n",
-            fInfinitySupport ? "curve_type_using_inf_support(p23)" : "curveType");
+            fInfinitySupport ? "curve_type_using_inf_support(p23)" : "curveType"));
 }
 
 void TessellateCurvesRenderStep::writeVertices(DrawWriter* dw,

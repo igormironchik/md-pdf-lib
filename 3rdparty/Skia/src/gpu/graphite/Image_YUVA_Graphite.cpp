@@ -7,6 +7,7 @@
 
 #include "src/gpu/graphite/Image_YUVA_Graphite.h"
 
+#include "include/codec/SkEncodedOrigin.h"
 #include "include/core/SkBitmap.h"
 #include "include/core/SkCanvas.h"
 #include "include/core/SkColorSpace.h"
@@ -17,6 +18,7 @@
 #include "include/gpu/graphite/Image.h"
 #include "include/gpu/graphite/Recorder.h"
 #include "include/gpu/graphite/Surface.h"
+#include "include/private/SkAttributes.h"
 #include "include/private/SkLog.h"
 #include "src/core/SkYUVAInfoLocation.h"
 #include "src/gpu/graphite/Caps.h"
@@ -92,6 +94,13 @@ sk_sp<Image_YUVA> Image_YUVA::Make(const Caps* caps,
     if (!yuvaInfo.isValid()) {
         return nullptr;
     }
+#if defined(SK_ENABLE_YUVA_PACKED_422)
+    // TODO: kYUYV is a single 4-channel plane with one texel per 2x1 block of pixels, which the
+    // code below does not handle yet. Reject it so that no SkImage takes those code paths.
+    if (yuvaInfo.planeConfig() == SkYUVAInfo::PlaneConfig::kYUYV) {
+        return nullptr;
+    }
+#endif
     SkImageInfo info = SkImageInfo::Make(
             yuvaInfo.dimensions(), kAssumedColorType, yuva_alpha_type(yuvaInfo), imageColorSpace);
     if (!SkImageInfoIsValid(info)) {
@@ -109,10 +118,11 @@ sk_sp<Image_YUVA> Image_YUVA::Make(const Caps* caps,
         if (!planes[i] || !caps->isTexturable(planes[i].proxy()->textureInfo())) {
             return nullptr;
         }
-        if (planes[i].dimensions() != planeDimensions[i]) {
+        if (planes[i].dimensions() != SK_UNSAFE_TODO(planeDimensions[i])) {
             return nullptr;
         }
-        pixmapChannelmasks[i] = TextureInfoPriv::ChannelMask(planes[i].proxy()->textureInfo());
+        SK_UNSAFE_TODO(pixmapChannelmasks[i]) =
+                TextureInfoPriv::ChannelMask(planes[i].proxy()->textureInfo());
     }
 
     // Re-arrange the proxies from planes to channels
@@ -123,7 +133,15 @@ sk_sp<Image_YUVA> Image_YUVA::Make(const Caps* caps,
         return nullptr;
     }
     // Y channel should match the YUVAInfo dimensions
-    if (planes[locations[kY].fPlane].dimensions() != yuvaInfo.dimensions()) {
+    SkISize yDims = yuvaInfo.dimensions();
+#if defined(SK_ENABLE_YUVA_PACKED_422)
+    if (yuvaInfo.planeConfig() == SkYUVAInfo::PlaneConfig::kYUYV &&
+        SkEncodedOriginSwapsWidthHeight(yuvaInfo.origin())) {
+        using std::swap;
+        swap(yDims.fWidth, yDims.fHeight);
+    }
+#endif
+    if (planes[locations[kY].fPlane].dimensions() != yDims) {
         return nullptr;
     }
     // UV channels should have planes with the same dimensions and subsampling factor.
@@ -184,8 +202,8 @@ sk_sp<Image_YUVA> Image_YUVA::WrapImages(const Caps* caps,
 
     TextureProxyView planes[SkYUVAInfo::kMaxPlanes];
     for (int i = 0; i < yuvaInfo.numPlanes(); ++i) {
-        planes[i] = AsView(images[i]);
-        if (!planes[i]) {
+        SK_UNSAFE_TODO(planes[i]) = AsView(images[i]);
+        if (SK_UNSAFE_TODO(!planes[i])) {
             // A null image, or not graphite-backed, or not backed by a single texture.
             return nullptr;
         }

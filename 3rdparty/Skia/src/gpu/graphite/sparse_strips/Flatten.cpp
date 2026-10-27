@@ -149,7 +149,10 @@ SK_ALWAYS_INLINE FlattenParams estimate_lines_from_quad(const SkPoint pts[3],
 
     double x0 = SkPoint::DotProduct(d01, dd) / cross;
     double x2 = SkPoint::DotProduct(d12, dd) / cross;
-    double scale = std::abs(cross / (dd.length() * (x2 - x0)));
+
+    // Equivalent to |cross / (|dd| * (x2 - x0))|, but avoids a scenario where (x2 - x0) == 0.
+    double ddSq = SkPoint::DotProduct(dd, dd);
+    double scale = (cross * cross) / (std::sqrt(ddSq) * ddSq);
 
     double a0 = approx_parabola_integral(x0);
     double a2 = approx_parabola_integral(x2);
@@ -274,23 +277,23 @@ SK_ALWAYS_INLINE SkPoint eval_cubic_scalar(const SkPoint pts[4], float t) {
 }
 
 template <int N>
-SK_ALWAYS_INLINE bool is_completely_culled(const SkPoint pts[N], float width, float height) {
+SK_ALWAYS_INLINE bool is_completely_culled(const SkPoint pts[N], const SkIRect& clip) {
     bool top = true;
     bool right = true;
     bool bottom = true;
     for (int i = 0; i < N; ++i) {
-        top    &= (pts[i].fY < 0.0f);
-        right  &= (pts[i].fX > width);
-        bottom &= (pts[i].fY > height);
+        top    &= (pts[i].fY < clip.top());
+        right  &= (pts[i].fX > clip.right());
+        bottom &= (pts[i].fY > clip.bottom());
     }
     return top || right || bottom;
 }
 
 template <int N>
-SK_ALWAYS_INLINE bool is_completely_left(const SkPoint pts[N]) {
+SK_ALWAYS_INLINE bool is_completely_left(const SkPoint pts[N], const SkIRect& clip) {
     bool left = true;
     for (int i = 0; i < N; ++i) {
-        left &= (pts[i].fX < 0.0f);
+        left &= (pts[i].fX < clip.left());
     }
     return left;
 }
@@ -350,16 +353,18 @@ SK_ALWAYS_INLINE skvx::float8 approx_parabola_inv_integral_simd(skvx::float8 x) 
 }
 
 SK_ALWAYS_INLINE skvx::int4 is_finite_simd(skvx::float4 x) {
-    // x is guaranteed positive area/length, no abs() needed to clear sign bit
-    return sk_bit_cast<skvx::int4>(x) < skvx::int4(0x7f800000);
+    // Mask out the sign bit so negative NaNs and -Inf are correctly rejected
+    return (sk_bit_cast<skvx::int4>(x) & 0x7fffffff) < skvx::int4(0x7f800000);
 }
 
 template <bool kIsIdentity,
+          bool kShouldCull,
           typename ProcessQuadFn,
           typename ProcessConicFn,
           typename ProcessCubicFn>
 SK_ALWAYS_INLINE void processPathsImpl(const SkPath& path,
                                        const SkMatrix& ctm,
+                                       const SkIRect& clip,
                                        Polyline* polyline,
                                        ProcessQuadFn&& processQuad,
                                        ProcessConicFn&& processConic,
@@ -368,6 +373,31 @@ SK_ALWAYS_INLINE void processPathsImpl(const SkPath& path,
     bool needStartPt = false;
     SkPoint startPt = {0, 0};
     SkPoint lastPt = {0, 0};
+
+    // Note: The closing edge must be considered even if every verb in the contour was culled.
+    // Culled verbs lie entirely above, right of, or below the clip and contribute no winding inside
+    // it, but the closing edge can still cross (or lie left of) the clip, in which case it may be
+    // the only geometry contributing winding.
+    auto closeContour = [&]() {
+        if (!closed && lastPt != startPt) {
+            SkPoint closePts[2] = {lastPt, startPt};
+            if constexpr (kShouldCull) {
+                if (!is_completely_culled<2>(closePts, clip)) {
+                    if (needStartPt) {
+                        polyline->appendPoint(lastPt);
+                    }
+                    polyline->appendPoint(startPt);
+                }
+            } else {
+                if (needStartPt) {
+                    polyline->appendPoint(lastPt);
+                }
+                polyline->appendPoint(startPt);
+            }
+        }
+        closed = true;
+        needStartPt = false;
+    };
 
     SkPath::Iter iter(path, false);
     SkPoint localPts[4];
@@ -383,16 +413,10 @@ SK_ALWAYS_INLINE void processPathsImpl(const SkPath& path,
                     pts = mappedPts;
                 }
 
-                if (!closed && lastPt != startPt) {
-                    if (needStartPt) {
-                        polyline->appendPoint(lastPt);
-                    }
-                    polyline->appendPoint(startPt);
-                }
+                closeContour();
                 polyline->appendSentinel();
 
                 closed = false;
-                needStartPt = false;
                 lastPt = pts[0];
                 startPt = pts[0];
                 polyline->appendPoint(pts[0]);
@@ -466,14 +490,7 @@ SK_ALWAYS_INLINE void processPathsImpl(const SkPath& path,
                 break;
             }
             case SkPath::kClose_Verb: {
-                closed = true;
-                if (lastPt != startPt) {
-                    if (needStartPt) {
-                        polyline->appendPoint(lastPt);
-                    }
-                    polyline->appendPoint(startPt);
-                }
-                needStartPt = false;
+                closeContour();
                 break;
             }
             default:
@@ -481,13 +498,7 @@ SK_ALWAYS_INLINE void processPathsImpl(const SkPath& path,
         }
     }
 
-    if (!closed && lastPt != startPt) {
-        if (needStartPt) {
-            polyline->appendPoint(lastPt);
-        }
-        polyline->appendPoint(startPt);
-    }
-
+    closeContour();
     polyline->appendSentinel();
 }
 
@@ -744,6 +755,8 @@ SK_ALWAYS_INLINE void Flatten::estimateLinesFromQuadSimd() {
         skvx::float4 uScale = 1.0f / (u2 - u0);
         u0 = skvx::if_then_else(collinearMask, skvx::float4(0.0f), u0);
         uScale = skvx::if_then_else(collinearMask, skvx::float4(1.0f), uScale);
+        a0 = skvx::if_then_else(collinearMask, skvx::float4(0.0f), a0);
+        da = skvx::if_then_else(collinearMask, skvx::float4(0.0f), da);
 
         a0.store(fContext.fA0.data() + i * 4);
         da.store(fContext.fDa.data() + i * 4);
@@ -841,14 +854,15 @@ uint32_t Flatten::flattenCubicsSimd(SkSpan<const SkPoint[4]> cubics) {
 
 template <bool kShouldCull, bool kShouldSimplify>
 SK_ALWAYS_INLINE void Flatten::processPathsSimdImpl(
-        const SkPath& path, const SkMatrix& ctm, float width, float height, Polyline* polyline) {
+        const SkPath& path, const SkMatrix& ctm, const SkIRect& clip, Polyline* polyline) {
     fContext.fFlattenedCubics.clear();
 
     auto processQuad = [&](const SkPoint pts[3], bool needStartPt) -> bool {
         if constexpr (kShouldCull) {
             skvx::float4 X(pts[0].fX, pts[1].fX, pts[2].fX, pts[2].fX); // Duplicate last pt
             skvx::float4 Y(pts[0].fY, pts[1].fY, pts[2].fY, pts[2].fY);
-            if (skvx::all(X > width) || skvx::all(Y < 0.0f) || skvx::all(Y > height)) {
+            if (skvx::all(X > clip.right()) || skvx::all(Y < clip.top()) ||
+                skvx::all(Y > clip.bottom())) {
                 return false;
             }
         }
@@ -857,7 +871,7 @@ SK_ALWAYS_INLINE void Flatten::processPathsSimdImpl(
         }
         if constexpr (kShouldSimplify) {
             skvx::float4 X(pts[0].fX, pts[1].fX, pts[2].fX, pts[2].fX);
-            if (skvx::all(X < 0.0f) ||
+            if (skvx::all(X < clip.left()) ||
                 is_within_dist_sq(pts[1], pts[0], pts[2], kQuadSubdivThreshold)) {
                 polyline->appendPoint(pts[2]);
                 return true;
@@ -875,7 +889,8 @@ SK_ALWAYS_INLINE void Flatten::processPathsSimdImpl(
             skvx::float4 X(pts[0].fX, pts[1].fX, pts[2].fX, pts[2].fX); // Duplicate last pt
             skvx::float4 Y(pts[0].fY, pts[1].fY, pts[2].fY, pts[2].fY);
 
-            if (skvx::all(X > width) || skvx::all(Y < 0.0f) || skvx::all(Y > height)) {
+            if (skvx::all(X > clip.right()) || skvx::all(Y < clip.top()) ||
+                skvx::all(Y > clip.bottom())) {
                 return false;
             }
         }
@@ -886,7 +901,7 @@ SK_ALWAYS_INLINE void Flatten::processPathsSimdImpl(
         if constexpr (kShouldSimplify) {
             // Simplify if completely to the left or visually a line
             skvx::float4 X(pts[0].fX, pts[1].fX, pts[2].fX, pts[2].fX);
-            if (skvx::all(X < 0.0f) ||
+            if (skvx::all(X < clip.left()) ||
                 is_within_dist_sq(pts[1], pts[0], pts[2], kQuadSubdivThreshold)) {
                 polyline->appendPoint(pts[2]);
                 return true;
@@ -906,7 +921,8 @@ SK_ALWAYS_INLINE void Flatten::processPathsSimdImpl(
         if constexpr (kShouldCull) {
             skvx::float4 X(pts[0].fX, pts[1].fX, pts[2].fX, pts[3].fX);
             skvx::float4 Y(pts[0].fY, pts[1].fY, pts[2].fY, pts[3].fY);
-            if (skvx::all(X > width) || skvx::all(Y < 0.0f) || skvx::all(Y > height)) {
+            if (skvx::all(X > clip.right()) || skvx::all(Y < clip.top()) ||
+                skvx::all(Y > clip.bottom())) {
                 return false;
             }
         }
@@ -915,7 +931,7 @@ SK_ALWAYS_INLINE void Flatten::processPathsSimdImpl(
         }
         if constexpr (kShouldSimplify) {
             skvx::float4 X(pts[0].fX, pts[1].fX, pts[2].fX, pts[3].fX);
-            if (skvx::all(X < 0.0f) ||
+            if (skvx::all(X < clip.left()) ||
                 (is_within_dist_sq(pts[1], pts[0], pts[3], kCubicSubdivThreshold) &&
                  is_within_dist_sq(pts[2], pts[0], pts[3], kCubicSubdivThreshold))) {
                 polyline->appendPoint(pts[3]);
@@ -928,21 +944,23 @@ SK_ALWAYS_INLINE void Flatten::processPathsSimdImpl(
     };
 
     if (ctm.isIdentity()) {
-        processPathsImpl<true>(path, ctm, polyline, processQuad, processConic, processCubic);
+        processPathsImpl</*kIsIdentity=*/true, kShouldCull>(
+                path, ctm, clip, polyline, processQuad, processConic, processCubic);
     } else {
-        processPathsImpl<false>(path, ctm, polyline, processQuad, processConic, processCubic);
+        processPathsImpl</*kIsIdentity=*/false, kShouldCull>(
+                path, ctm, clip, polyline, processQuad, processConic, processCubic);
     }
 }
 
 template <bool kShouldCull, bool kShouldSimplify>
 SK_ALWAYS_INLINE void Flatten::processPathsScalarImpl(
-        const SkPath& path, const SkMatrix& ctm, float width, float height, Polyline* polyline) {
+        const SkPath& path, const SkMatrix& ctm, const SkIRect& clip, Polyline* polyline) {
     fContext.fFlattenedCubics.clear();
 
     auto processQuad = [&](const SkPoint pts[3], bool needStartPt) -> bool {
         if constexpr (kShouldCull) {
             // If the quad is completely top, right, or bottom of the viewport, cull.
-            if (is_completely_culled<3>(pts, width, height)) {
+            if (is_completely_culled<3>(pts, clip)) {
                 return false;
             }
         }
@@ -951,7 +969,7 @@ SK_ALWAYS_INLINE void Flatten::processPathsScalarImpl(
         }
         if constexpr (kShouldSimplify) {
             // If the quad is visually a line or completely left of the viewport, simplify.
-            if (is_completely_left<3>(pts) ||
+            if (is_completely_left<3>(pts, clip) ||
                 is_within_dist_sq(pts[1], pts[0], pts[2], kQuadSubdivThreshold)) {
                 polyline->appendPoint(pts[2]);
                 return true;
@@ -964,7 +982,7 @@ SK_ALWAYS_INLINE void Flatten::processPathsScalarImpl(
     auto processConic = [&](const SkPoint pts[3], float weight, bool needStartPt) -> bool {
         if constexpr (kShouldCull) {
             // If the conic is completely top, right, or bottom of the viewport, cull.
-            if (is_completely_culled<3>(pts, width, height)) {
+            if (is_completely_culled<3>(pts, clip)) {
                 return false;
             }
         }
@@ -975,7 +993,7 @@ SK_ALWAYS_INLINE void Flatten::processPathsScalarImpl(
             // If the conic is visually a line or completely left of the viewport, simplify.
             // Note: A low weight can produce a visually flat conic even if the control point is far
             // away, causing a false negative. This is acceptable as we fall back to subdivision.
-            if (is_completely_left<3>(pts) ||
+            if (is_completely_left<3>(pts, clip) ||
                 is_within_dist_sq(pts[1], pts[0], pts[2], kQuadSubdivThreshold)) {
                 polyline->appendPoint(pts[2]);
                 return true;
@@ -992,7 +1010,7 @@ SK_ALWAYS_INLINE void Flatten::processPathsScalarImpl(
     auto processCubic = [&](const SkPoint pts[4], bool needStartPt) -> bool {
         if constexpr (kShouldCull) {
             // If the cubic is completely top, right, or bottom of the viewport, cull.
-            if (is_completely_culled<4>(pts, width, height)) {
+            if (is_completely_culled<4>(pts, clip)) {
                 return false;
             }
         }
@@ -1001,7 +1019,7 @@ SK_ALWAYS_INLINE void Flatten::processPathsScalarImpl(
         }
         if constexpr (kShouldSimplify) {
             // If the cubic is visually a line or completely left of the viewport, simplify.
-            if (is_completely_left<4>(pts) ||
+            if (is_completely_left<4>(pts, clip) ||
                 (is_within_dist_sq(pts[1], pts[0], pts[3], kCubicSubdivThreshold) &&
                  is_within_dist_sq(pts[2], pts[0], pts[3], kCubicSubdivThreshold))) {
                 polyline->appendPoint(pts[3]);
@@ -1014,37 +1032,47 @@ SK_ALWAYS_INLINE void Flatten::processPathsScalarImpl(
     };
 
     if (ctm.isIdentity()) {
-        processPathsImpl</*kIsIdentity=*/true>(
-                path, ctm, polyline, processQuad, processConic, processCubic);
+        processPathsImpl</*kIsIdentity=*/true, kShouldCull>(
+                path, ctm, clip, polyline, processQuad, processConic, processCubic);
     } else {
-        processPathsImpl</*kIsIdentity=*/false>(
-                path, ctm, polyline, processQuad, processConic, processCubic);
+        processPathsImpl</*kIsIdentity=*/false, kShouldCull>(
+                path, ctm, clip, polyline, processQuad, processConic, processCubic);
     }
 }
 
 void Flatten::processPathsSimd(
-        const SkPath& path, const SkMatrix& ctm, float width, float height, Polyline* polyline) {
+        const SkPath& path, const SkMatrix& ctm, const SkIRect& clip, Polyline* polyline) {
     this->processPathsSimdImpl</*kShouldCull=*/true, /*kShouldSimplify=*/true>(
-            path, ctm, width, height, polyline);
+            path, ctm, clip, polyline);
 }
 
 void Flatten::processPathsScalar(
-        const SkPath& path, const SkMatrix& ctm, float width, float height, Polyline* polyline) {
+        const SkPath& path, const SkMatrix& ctm, const SkIRect& clip, Polyline* polyline) {
     this->processPathsScalarImpl</*kShouldCull=*/true, /*kShouldSimplify=*/true>(
-            path, ctm, width, height, polyline);
+            path, ctm, clip, polyline);
 }
 
 #if defined(GPU_TEST_UTILS)
 void Flatten::processPathsSimdTest(
-        const SkPath& path, const SkMatrix& ctm, float width, float height, Polyline* polyline) {
+        const SkPath& path, const SkMatrix& ctm, const SkIRect& clip, Polyline* polyline) {
     this->processPathsSimdImpl</*kShouldCull=*/false, /*kShouldSimplify=*/false>(
-            path, ctm, width, height, polyline);
+            path, ctm, clip, polyline);
+}
+
+void Flatten::processPathsScalarTest(
+        const SkPath& path, const SkMatrix& ctm, const SkIRect& clip, Polyline* polyline) {
+    this->processPathsScalarImpl</*kShouldCull=*/false, /*kShouldSimplify=*/false>(
+            path, ctm, clip, polyline);
+}
+
+void Flatten::processPathsSimdTest(
+        const SkPath& path, const SkMatrix& ctm, float width, float height, Polyline* polyline) {
+    this->processPathsSimdTest(path, ctm, SkIRect::MakeWH(width, height), polyline);
 }
 
 void Flatten::processPathsScalarTest(
         const SkPath& path, const SkMatrix& ctm, float width, float height, Polyline* polyline) {
-    this->processPathsScalarImpl</*kShouldCull=*/false, /*kShouldSimplify=*/false>(
-            path, ctm, width, height, polyline);
+    this->processPathsScalarTest(path, ctm, SkIRect::MakeWH(width, height), polyline);
 }
 #endif
 

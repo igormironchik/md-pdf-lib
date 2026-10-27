@@ -20,10 +20,11 @@
 #include "include/private/SkEnumBitMask.h"
 #include "src/core/SkDevice.h"
 #include "src/gpu/graphite/ClipStack.h"
-#include "src/gpu/graphite/DrawOrder.h"
 #include "src/gpu/graphite/ResourceTypes.h"
+#include "src/gpu/graphite/draw/DrawOrder.h"
 #include "src/gpu/graphite/geom/Rect.h"
 #include "src/gpu/graphite/geom/Transform.h"
+#include "src/partition_alloc/raw_ptr.h"
 #include "src/text/gpu/SubRunContainer.h"
 #include "src/text/gpu/SubRunControl.h"
 
@@ -84,6 +85,10 @@ class Task;
 class TextureProxy;
 class TextureProxyView;
 
+#if defined(SK_ENABLE_SPARSE_STRIPS)
+class StripGenerator;
+#endif
+
 class Device final : public SkDevice {
 public:
     ~Device() override;
@@ -97,7 +102,8 @@ public:
                               const SkColorInfo&,
                               const SkSurfaceProps&,
                               LoadOp initialLoadOp,
-                              bool registerWithRecorder=true);
+                              bool registerWithRecorder=true,
+                              bool allowUnpremul=false);
     // Convenience factory to create the underlying TextureProxy based on the configuration provided
     static sk_sp<Device> Make(Recorder*,
                               const SkImageInfo&,
@@ -107,7 +113,8 @@ public:
                               const SkSurfaceProps&,
                               LoadOp initialLoadOp,
                               std::string_view label,
-                              bool registerWithRecorder=true);
+                              bool registerWithRecorder=true,
+                              bool allowUnpremul=false);
 
     Device* asGraphiteDevice() override { return this; }
 
@@ -261,7 +268,8 @@ public:
     void drawCoverageMask(const SkSpecialImage*, const SkMatrix& maskToDevice,
                           const SkSamplingOptions&, const SkPaint&) override;
 
-    bool drawBlurredRRect(const SkRRect&, const SkPaint&, float deviceSigma) override;
+    bool drawBlurredRRect(const SkRRect&, const SkPaint&,
+                          SkV2 localSigma, float deviceSigma) override;
 
 #if defined(GPU_TEST_UTILS)
     int testingOnly_pendingRenderSteps() const;
@@ -355,7 +363,7 @@ private:
     // Flush internal work, such as pending clip draws and atlas uploads, into the Device's DrawTask
     void internalFlush();
 
-    Recorder* fRecorder;
+    raw_ptr<Recorder> fRecorder;
     sk_sp<DrawContext> fDC;
     // Scratch devices hold on to their last snapped DrawTask so that they can be directly
     // referenced when the device image is drawn into some other surface.
@@ -404,6 +412,10 @@ private:
 #endif
 
     friend class ClipStack; // for drawClipShape
+
+#if defined(SK_ENABLE_SPARSE_STRIPS)
+    std::unique_ptr<StripGenerator> fStripGenerator;
+#endif
 };
 
 } // namespace skgpu::graphite

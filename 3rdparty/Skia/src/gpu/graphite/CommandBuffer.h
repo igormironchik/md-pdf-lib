@@ -33,6 +33,7 @@ class RefCntedCallback;
 namespace skgpu::graphite {
 
 class BackendSemaphore;
+class BackendTexture;
 class Buffer;
 class DispatchGroup;
 class DrawPass;
@@ -54,6 +55,9 @@ public:
     bool isResourceTracked(const Resource* resource);
 #endif
 
+    int numPendingCommands() const { return fNumPendingCommands; }
+    int numPendingPasses() const { return fNumPendingPasses; }
+
     // Takes a CommandBuffer ref on the Resource that will be released when the command buffer has
     // finished execution. This allows a Resource to be returned to ResourceCache for reuse while
     // the CommandBuffer is still executing on the GPU. This is most commonly used for Textures or
@@ -69,15 +73,14 @@ public:
     virtual void endStatsQuery(GpuStatsFlags) { SK_ABORT("Stats query unsupported."); }
     virtual std::optional<GpuStats> gpuStats() { return {}; }
 
-    void addFinishedProc(sk_sp<RefCntedCallback> finishedProc);
-    void callFinishedProcs(bool success);
-
     virtual void addWaitSemaphores(size_t numWaitSemaphores,
                                    const BackendSemaphore* waitSemaphores) {}
     virtual void addSignalSemaphores(size_t numWaitSemaphores,
                                      const BackendSemaphore* signalSemaphores) {}
     virtual void prepareSurfaceForStateUpdate(SkSurface* targetSurface,
                                               const MutableTextureState* newState) {}
+    virtual void prepareBackendTextureForStateUpdate(const BackendTexture& texture,
+                                                     const MutableTextureState* newState) {}
 
     void addBuffersToAsyncMapOnSubmit(SkSpan<const sk_sp<Buffer>>);
     SkSpan<const sk_sp<Buffer>> buffersToAsyncMapOnSubmit() const;
@@ -215,8 +218,9 @@ private:
     template <typename T>
     using TrackedResourceArray = skia_private::STArray<kInitialTrackedResourcesCount, T>;
     TrackedResourceArray<gr_cb<Resource>> fCommandBufferResources;
-    skia_private::TArray<sk_sp<RefCntedCallback>> fFinishedProcs;
     skia_private::TArray<sk_sp<Buffer>> fBuffersToAsyncMap;
+    int fNumPendingCommands = 0;
+    int fNumPendingPasses = 0;
 };
 
 } // namespace skgpu::graphite

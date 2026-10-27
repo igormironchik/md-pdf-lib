@@ -42,6 +42,7 @@
 #include "src/gpu/ganesh/effects/GrYUVtoRGBEffect.h"
 #include "src/image/SkImage_Base.h"
 
+#include <array>
 #include <utility>
 
 enum class SkTileMode;
@@ -92,7 +93,7 @@ bool SkImage_GaneshYUVA::setupMipmapsForPlanes(GrRecordingContext* context) cons
         return true;
     }
     int n = fYUVAProxies.yuvaInfo().numPlanes();
-    sk_sp<GrSurfaceProxy> newProxies[4];
+    std::array<sk_sp<GrSurfaceProxy>, 4> newProxies;
     for (int i = 0; i < n; ++i) {
         auto* t = fYUVAProxies.proxy(i)->asTextureProxy();
         if (t->mipmapped() == skgpu::Mipmapped::kNo && (t->width() > 1 || t->height() > 1)) {
@@ -106,8 +107,8 @@ bool SkImage_GaneshYUVA::setupMipmapsForPlanes(GrRecordingContext* context) cons
             newProxies[i] = fYUVAProxies.refProxy(i);
         }
     }
-    fYUVAProxies =
-            GrYUVATextureProxies(fYUVAProxies.yuvaInfo(), newProxies, fYUVAProxies.textureOrigin());
+    fYUVAProxies = GrYUVATextureProxies(fYUVAProxies.yuvaInfo(), newProxies.data(),
+                                        fYUVAProxies.textureOrigin());
     SkASSERT(fYUVAProxies.isValid());
     return true;
 }
@@ -126,13 +127,13 @@ GrDirectContext::FlushResult SkImage_GaneshYUVA::flush(GrDirectContext* dContext
         return {false, GrSemaphoresSubmitted::kNo};
     }
 
-    GrSurfaceProxy* proxies[SkYUVAInfo::kMaxPlanes] = {};
+    std::array<GrSurfaceProxy *, SkYUVAInfo::kMaxPlanes> proxies = {};
     size_t numProxies = fYUVAProxies.numPlanes();
     for (size_t i = 0; i < numProxies; ++i) {
         proxies[i] = fYUVAProxies.proxy(i);
     }
     return dContext->priv().flushSurfaces(
-            {proxies, numProxies}, SkSurfaces::BackendSurfaceAccess::kNoAccess, info);
+            {proxies.data(), numProxies}, SkSurfaces::BackendSurfaceAccess::kNoAccess, info);
 }
 
 bool SkImage_GaneshYUVA::onHasMipmaps() const {
@@ -252,7 +253,14 @@ std::unique_ptr<GrFragmentProcessor> SkImage_GaneshYUVA::asFragmentProcessor(
     auto wmx = SkTileModeToWrapMode(tileModes[0]);
     auto wmy = SkTileModeToWrapMode(tileModes[1]);
     GrSamplerState sampler(wmx, wmy, sampling.filter, sampling.mipmap);
-    if (sampler.mipmapped() == skgpu::Mipmapped::kYes && !this->setupMipmapsForPlanes(context)) {
+    // The packed 4:2:2 plane is always sampled without mip levels (they would blend its U and V
+    // lanes), so don't build any.
+    bool dropMips = false;
+#if defined(SK_ENABLE_YUVA_PACKED_422)
+    dropMips = fYUVAProxies.yuvaInfo().planeConfig() == SkYUVAInfo::PlaneConfig::kYUYV;
+#endif
+    if (sampler.mipmapped() == skgpu::Mipmapped::kYes &&
+        (dropMips || !this->setupMipmapsForPlanes(context))) {
         sampler = GrSamplerState(sampler.wrapModeX(),
                                  sampler.wrapModeY(),
                                  sampler.filter(),

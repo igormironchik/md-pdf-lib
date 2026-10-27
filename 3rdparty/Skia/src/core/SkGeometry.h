@@ -14,6 +14,7 @@
 #include "include/core/SkSpan.h"
 #include "include/core/SkTypes.h"
 #include "include/private/SkFloatingPoint.h"
+#include "include/private/SkOnlyStackAllocatable.h"
 #include "src/core/SkVx.h"
 
 #include <cstring>
@@ -372,6 +373,9 @@ struct SkConic {
     void computeAsQuadError(SkVector* err) const;
     bool asQuadTol(SkScalar tol) const;
 
+    // Limit the number of suggested quads to approximate a conic
+    static constexpr int kMaxConicToQuadPOW2 = 5;
+
     /**
      *  return the power-of-2 number of quads needed to approximate this conic
      *  with a sequence of quads. Will be >= 0.
@@ -504,6 +508,8 @@ struct SkCubicCoeff {
  */
 class [[nodiscard]] SkAutoConicToQuads {
 public:
+    SK_ONLY_STACK_ALLOCATABLE;
+
     SkAutoConicToQuads() : fQuadCount(0) {}
 
     /**

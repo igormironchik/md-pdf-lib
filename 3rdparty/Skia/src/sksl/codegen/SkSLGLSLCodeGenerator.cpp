@@ -15,6 +15,7 @@
 #include "src/core/SkStringView.h"
 #include "src/core/SkTHash.h"
 #include "src/core/SkTraceEvent.h"
+#include "src/partition_alloc/raw_ptr.h"
 #include "src/sksl/SkSLAnalysis.h"
 #include "src/sksl/SkSLBuiltinTypes.h"
 #include "src/sksl/SkSLCompiler.h"
@@ -75,6 +76,7 @@
 #include "src/sksl/ir/SkSLVariableReference.h"
 #include "src/sksl/spirv.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -222,7 +224,7 @@ protected:
     int fVarCount = 0;
     int fIndentation = 0;
     bool fAtLineStart = false;
-    const FunctionDeclaration* fCurrentFunction = nullptr;
+    raw_ptr<const FunctionDeclaration> fCurrentFunction = nullptr;
 
     // true if we have run into usages of dFdx / dFdy
     bool fFoundDerivatives = false;
@@ -237,7 +239,7 @@ protected:
     bool fWrittenAbsEmulation = false;
     bool fWrittenDeterminant2 = false, fWrittenDeterminant3 = false, fWrittenDeterminant4 = false;
     bool fWrittenInverse2 = false, fWrittenInverse3 = false, fWrittenInverse4 = false;
-    bool fWrittenTranspose[3][3] = {};
+    std::array<std::array<bool, 3>, 3> fWrittenTranspose = {};
 };
 
 void GLSLCodeGenerator::write(std::string_view s) {
@@ -901,6 +903,11 @@ void GLSLCodeGenerator::writeFunctionCall(const FunctionCall& c) {
                 case SpvDimSubpassData:
                     SkASSERT(false); // doesn't exist
                     dim = "SubpassData";
+                    proj = false;
+                    break;
+                case SpvDimTileImageDataEXT:  // fall through
+                case SpvDimMax:
+                    SkASSERT(false); // doesn't exist
                     proj = false;
                     break;
             }

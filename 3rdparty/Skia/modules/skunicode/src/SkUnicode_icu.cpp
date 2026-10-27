@@ -30,6 +30,7 @@
 #include <unicode/utext.h>
 #include <unicode/utypes.h>
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -435,6 +436,10 @@ class SkUnicode_icu : public SkUnicode {
         return SkUnicode_icu::isHardLineBreak(utf8);
     }
 
+    bool isDefaultIgnorable(SkUnichar unichar) override {
+        return sk_u_hasBinaryProperty(unichar, UCHAR_DEFAULT_IGNORABLE_CODE_POINT);
+    }
+
     bool isEmoji(SkUnichar unichar) override {
         return sk_u_hasBinaryProperty(unichar, UCHAR_EMOJI);
     }
@@ -466,6 +471,23 @@ class SkUnicode_icu : public SkUnicode {
     static bool isHardLineBreak(SkUnichar utf8) {
         auto property = sk_u_getIntPropertyValue(utf8, UCHAR_LINE_BREAK);
         return property == U_LB_LINE_FEED || property == U_LB_MANDATORY_BREAK;
+    }
+
+    static CodeUnitFlags CodePointFlags(SkUnichar unichar) {
+        CodeUnitFlags flags = CodeUnitFlags::kNoCodeUnitFlag;
+        if (sk_u_isspace(unichar)) {
+            flags |= SkUnicode::kPartOfIntraWordBreak;
+        }
+        if (sk_u_isWhitespace(unichar)) {
+            flags |= SkUnicode::kPartOfWhiteSpaceBreak;
+        }
+        if (sk_u_iscntrl(unichar)) {
+            flags |= SkUnicode::kControl;
+        }
+        if (sk_u_hasBinaryProperty(unichar, UCHAR_IDEOGRAPHIC)) {
+            flags |= SkUnicode::kIdeographic;
+        }
+        return flags;
     }
 
 public:
@@ -588,6 +610,16 @@ public:
             (*results)[pos] |= CodeUnitFlags::kGraphemeStart;
         });
 
+        // The flags of ASCII code points, from the same ICU calls.
+        // A function-local static is initialized once, and thread-safe (C++11).
+        static const auto kAsciiFlags = [] {
+            std::array<CodeUnitFlags, 128> flags;
+            for (SkUnichar c = 0; c < 128; ++c) {
+                flags[c] = CodePointFlags(c);
+            }
+            return flags;
+        }();
+
         const char* current = utf8;
         const char* end = utf8 + utf8Units;
         while (current < end) {
@@ -602,19 +634,11 @@ public:
                     utf8[before] = ' ';
                 }
             }
+            // These flags depend only on the code point. Get them once for all its code units.
+            const CodeUnitFlags flags =
+                    unichar < 128 ? kAsciiFlags[unichar] : CodePointFlags(unichar);
             for (auto i = before; i < after; ++i) {
-                if (this->isSpace(unichar)) {
-                    results->at(i) |= SkUnicode::kPartOfIntraWordBreak;
-                }
-                if (this->isWhitespace(unichar)) {
-                    results->at(i) |= SkUnicode::kPartOfWhiteSpaceBreak;
-                }
-                if (this->isControl(unichar)) {
-                    results->at(i) |= SkUnicode::kControl;
-                }
-                if (this->isIdeographic(unichar)) {
-                    results->at(i) |= SkUnicode::kIdeographic;
-                }
+                results->at(i) |= flags;
             }
         }
 
@@ -629,23 +653,25 @@ public:
         // Get white spaces
         this->forEachCodepoint((char16_t*)&utf16[0], utf16Units,
            [this, results, replaceTabs, &utf16](SkUnichar unichar, int32_t start, int32_t end) {
+                // A tab is one code unit.
+                if (replaceTabs && this->isTabulation(unichar)) {
+                    results->at(start) |= SkUnicode::kTabulation;
+                    unichar = ' ';
+                    utf16[start] = ' ';
+                }
+                // Get the flags once for all code units of the code point.
+                CodeUnitFlags flags = CodeUnitFlags::kNoCodeUnitFlag;
+                if (this->isSpace(unichar)) {
+                    flags |= SkUnicode::kPartOfIntraWordBreak;
+                }
+                if (this->isWhitespace(unichar)) {
+                    flags |= SkUnicode::kPartOfWhiteSpaceBreak;
+                }
+                if (this->isControl(unichar)) {
+                    flags |= SkUnicode::kControl;
+                }
                 for (auto i = start; i < end; ++i) {
-                    if (replaceTabs && this->isTabulation(unichar)) {
-                        results->at(i) |= SkUnicode::kTabulation;
-                    if (replaceTabs) {
-                            unichar = ' ';
-                            utf16[start] = ' ';
-                        }
-                    }
-                    if (this->isSpace(unichar)) {
-                        results->at(i) |= SkUnicode::kPartOfIntraWordBreak;
-                    }
-                    if (this->isWhitespace(unichar)) {
-                        results->at(i) |= SkUnicode::kPartOfWhiteSpaceBreak;
-                    }
-                    if (this->isControl(unichar)) {
-                        results->at(i) |= SkUnicode::kControl;
-                    }
+                    results->at(i) |= flags;
                 }
            });
         // Get graphemes

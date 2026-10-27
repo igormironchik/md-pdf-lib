@@ -12,11 +12,11 @@
 #include "src/core/SkSLTypeShared.h"
 #include "src/gpu/BufferWriter.h"
 #include "src/gpu/graphite/Attribute.h"
-#include "src/gpu/graphite/DrawOrder.h"
-#include "src/gpu/graphite/DrawParams.h"
 #include "src/gpu/graphite/DrawTypes.h"
-#include "src/gpu/graphite/DrawWriter.h"
 #include "src/gpu/graphite/PipelineData.h"
+#include "src/gpu/graphite/draw/DrawOrder.h"
+#include "src/gpu/graphite/draw/DrawParams.h"
+#include "src/gpu/graphite/draw/DrawWriter.h"
 #include "src/gpu/graphite/geom/Geometry.h"
 #include "src/gpu/graphite/geom/Shape.h"
 #include "src/gpu/graphite/geom/Transform.h"
@@ -30,10 +30,11 @@ namespace skgpu::graphite {
 WideTileRenderStep::WideTileRenderStep(Layout layout)
         : RenderStep(layout,
                      RenderStepID::kWideTile,
-                     Flags::kAppendInstances | Flags::kPerformsShading,
+                     Flags::kAppendInstances | Flags::kPerformsShading
+                                             | Flags::kNoSelfIntersections,
                      /*uniforms=*/{},
                      PrimitiveType::kTriangleStrip,
-                     kDirectDepthLessPass,
+                     /*stencilSettings=*/{},
                      /*vertexAttrs=*/{},
                      /*instanceAttrs=*/
                      {{"tileBounds", VertexAttribType::kFloat4, SkSLType::kFloat4},

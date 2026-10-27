@@ -4,10 +4,11 @@
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
-#include "src/gpu/graphite/DrawPass.h"
+#include "src/gpu/graphite/draw/DrawPass.h"
 
 #include "include/private/SkLog.h"
 #include "src/core/SkTraceEvent.h"
+#include "src/gpu/graphite/CommandBuffer.h"
 #include "src/gpu/graphite/PaintParams.h"
 #include "src/gpu/graphite/PaintParamsKey.h"
 #include "src/gpu/graphite/PipelineCreationTask.h"
@@ -21,7 +22,6 @@
 #include "src/gpu/graphite/SharedContext.h"
 #include "src/gpu/graphite/Texture.h"  // IWYU pragma: keep
 #include "src/gpu/graphite/TextureProxy.h"
-
 
 using namespace skia_private;
 
@@ -76,27 +76,34 @@ bool DrawPass::prepareResources(ResourceProvider* resourceProvider,
         }
     }
 
+    if (fStorageFallbackTexture) {
+        SkASSERT(fStorageFallbackTexture->textureInfo().isValid());
+        if (!fStorageFallbackTexture->isInstantiated() && !fStorageFallbackTexture->isLazy()) {
+            SKIA_LOG_W("Cannot sample from an uninstantiated TextureProxy, label %s",
+                        fStorageFallbackTexture->label());
+            return false;
+        }
+    }
+
     return true;
 }
 
 bool DrawPass::addResourceRefs(ResourceProvider* resourceProvider,
                                CommandBuffer* commandBuffer) {
-    TRACE_EVENT1_ALWAYS("skia.shaders",
-                        "GraphitePipelineUse",
-                        "# pipelines",
-                        fPipelineHandles.size());
+    TRACE_EVENT0_ALWAYS("skia.shaders", "GraphitePipelineUse");
 
     SharedContext* sharedContext = resourceProvider->sharedContext();
     PipelineManager* pipelineManager = sharedContext->pipelineManager();
 
     SkASSERT(fPipelineHandles.size() == fPipelineDrawAreas.size());
     for (int i = 0; i < fPipelineHandles.size(); ++i) {
-        sk_sp<GraphicsPipeline> pipeline = pipelineManager->resolveHandle(sharedContext,
-                                                                          fPipelineHandles[i]);
+        sk_sp<GraphicsPipeline> pipeline = pipelineManager->resolveHandle(fPipelineHandles[i]);
         if (!pipeline) {
             SKIA_LOG_W("Failed to create Pipeline for draw in RenderPass. Dropping draw!");
             return false;
         }
+
+        fStorageBufferStages |= pipeline->storageBufferStages();
 
         TRACE_EVENT_INSTANT1_ALWAYS(
                 "skia.shaders",
@@ -113,7 +120,28 @@ bool DrawPass::addResourceRefs(ResourceProvider* resourceProvider,
         commandBuffer->trackResource(fSampledTextures[i]->refTexture());
     }
 
+    if (fStorageFallbackTexture) {
+        // When the StorageContext finalizes the fallback texture, it creates an UploadTask that is
+        // a recordDependency of the drawContext, so assert that the texture should be tracked and
+        // instantiated by this point.
+        //
+        // Note, this is a violation of separate of concerns---ideally the drawPass should be solely
+        // responsible for resourceTracking, but to avoid duplicated work, we assert here.
+        SkASSERT(fStorageFallbackTexture->isInstantiated());
+        SkASSERT(commandBuffer->isResourceTracked(fStorageFallbackTexture->texture()));
+    }
+
     return true;
+}
+
+void DrawPass::setStorageResult(StorageContextResult result) {
+    if (std::holds_alternative<BindBufferInfo>(result)) {
+        fStorageBufferInfo = std::get<BindBufferInfo>(result);
+        SkASSERT(fStorageBufferInfo);
+    } else {
+        fStorageFallbackTexture = std::move(std::get<sk_sp<TextureProxy>>(result));
+        SkASSERT(fStorageFallbackTexture);
+    }
 }
 
 } // namespace skgpu::graphite

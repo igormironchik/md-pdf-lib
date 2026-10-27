@@ -13,8 +13,10 @@
 #include "include/gpu/graphite/vk/VulkanGraphiteTypes.h"
 #include "include/gpu/vk/VulkanExtensions.h"
 #include "include/gpu/vk/VulkanTypes.h"
+#include "include/private/SkAttributes.h"
 #include "include/private/SkMath.h"
 #include "src/gpu/SwizzlePriv.h"
+#include "src/gpu/graphite/ComputePipelineDesc.h"
 #include "src/gpu/graphite/ContextUtils.h"
 #include "src/gpu/graphite/GraphicsPipelineDesc.h"
 #include "src/gpu/graphite/GraphiteResourceKey.h"
@@ -132,8 +134,7 @@ void VulkanCaps::init(const ContextOptions& contextOptions,
 
     // Assert that our push constant sizes are below the maximum allowed (which is guaranteed to be
     // at least 128 bytes per spec).
-    static_assert(VulkanResourceProvider::kIntrinsicConstantSize < 128 &&
-                  VulkanResourceProvider::kLoadMSAAPushConstantSize < 128);
+    static_assert(VulkanResourceProvider::kIntrinsicConstantSize < 128);
 
     fRequiredUniformBufferAlignment = deviceLimits.minUniformBufferOffsetAlignment;
     fRequiredStorageBufferAlignment = deviceLimits.minStorageBufferOffsetAlignment;
@@ -156,6 +157,12 @@ void VulkanCaps::init(const ContextOptions& contextOptions,
     // TODO(b/353983969): Enable storage buffers once perf regressions are addressed.
     fStorageBufferSupport = false;
 
+    // These are guaranteed to be supported on Vulkan 1.0+.
+    SkASSERT(deviceLimits.maxComputeWorkGroupInvocations > 0);
+    SkASSERT(deviceLimits.maxPerStageDescriptorStorageBuffers > 0);
+    fComputeSupport = true;
+    fStorageBufferSupportForCompute = true;
+
     VkPhysicalDeviceMemoryProperties deviceMemoryProperties;
     VULKAN_CALL(vkInterface, GetPhysicalDeviceMemoryProperties(physDev, &deviceMemoryProperties));
     fSupportsMemorylessAttachments = false;
@@ -167,7 +174,8 @@ void VulkanCaps::init(const ContextOptions& contextOptions,
         requiredLazyFlags |= VK_MEMORY_PROPERTY_PROTECTED_BIT;
     }
     for (uint32_t i = 0; i < deviceMemoryProperties.memoryTypeCount; ++i) {
-        const uint32_t& supportedFlags = deviceMemoryProperties.memoryTypes[i].propertyFlags;
+        const uint32_t& supportedFlags =
+                SK_UNSAFE_TODO(deviceMemoryProperties.memoryTypes[i].propertyFlags);
         if ((supportedFlags & requiredLazyFlags) == requiredLazyFlags) {
             fSupportsMemorylessAttachments = true;
         }
@@ -198,6 +206,9 @@ void VulkanCaps::init(const ContextOptions& contextOptions,
             vendorID == skgpu::kAMD_VkVendor ? 32 : deviceLimits.maxVertexInputAttributes;
     fMaxUniformBufferRange = deviceLimits.maxUniformBufferRange;
     fMaxStorageBufferRange = deviceLimits.maxStorageBufferRange;
+    fResourceBindingReqs.fMaxStorageBufferBytes = SkTo<int>(
+            std::min<uint64_t>(fMaxStorageBufferRange,
+                               ResourceBindingRequirements::kDefaultMaxStorageBufferBytes));
 
 #ifdef SK_BUILD_FOR_ANDROID
     if (extensions->hasExtension(
@@ -212,6 +223,7 @@ void VulkanCaps::init(const ContextOptions& contextOptions,
     fSupportsFrameBoundary = enabledFeatures.fFrameBoundary;
 
     fSupportsPipelineCreationCacheControl = enabledFeatures.fPipelineCreationCacheControl;
+    fSupportsPipelineProtectedAccess = enabledFeatures.fPipelineProtectedAccess;
 
     if (enabledFeatures.fAdvancedBlendModes) {
         fBlendEqSupport = enabledFeatures.fCoherentAdvancedBlendModes
@@ -248,9 +260,7 @@ void VulkanCaps::init(const ContextOptions& contextOptions,
     }
 
     // Note: ARM GPUs have always been coherent, do not add a subpass self-dependency even if the
-    // application hasn't enabled this feature as it comes with a performance cost on this GPU. Use
-    // of VK_EXT_rasterization_order_attachment_access is disabled on ARM due to an unexplained
-    // memory regression (b/437907749).
+    // application hasn't enabled this feature as it comes with a performance cost on this GPU.
     //
     // Imagination GPUs are also coherent but only within the same sample when sample-shading.
     // VK_EXT_rasterization_order_attachment_access indicates coherence when input attachment read
@@ -258,11 +268,11 @@ void VulkanCaps::init(const ContextOptions& contextOptions,
     // this extension. This is not a problem for Graphite however, which does not enable sample
     // shading (nor would it read color from other samples even if it did).
     fSupportsRasterizationOrderColorAttachmentAccess =
-            enabledFeatures.fRasterizationOrderColorAttachmentAccess && vendorID != kARM_VkVendor;
+            enabledFeatures.fRasterizationOrderColorAttachmentAccess;
     fIsInputAttachmentReadCoherent = fSupportsRasterizationOrderColorAttachmentAccess ||
                                      vendorID == kARM_VkVendor || vendorID == kImagination_VkVendor;
 
-    this->initShaderCaps(enabledFeatures, vendorID);
+    this->initShaderCaps(enabledFeatures, vendorID, deviceProperties.fSubgroup);
 
     // Vulkan 1.0 dynamic state is always supported.  Dynamic state based on features of
     // VK_EXT_extended_dynamic_state and VK_EXT_extended_dynamic_state2 are also considered basic
@@ -283,8 +293,10 @@ void VulkanCaps::init(const ContextOptions& contextOptions,
             enabledFeatures.fGraphicsPipelineLibrary &&
             (deviceProperties.fGpl.graphicsPipelineLibraryFastLinking || vendorID == kARM_VkVendor);
 
-
-    fSupportsFrameBoundary = enabledFeatures.fFrameBoundary;
+    // Vulkan allows attachments to be bigger than the VkFramebuffer, which Graphite sizes to the
+    // main texture, so using approx-sized dimensions for MSAA and D/S attachments reduces the
+    // number of Resources in play (although hopefully they are all transient anyways).
+    fAttachmentSizePolicy = AttachmentSizePolicy::kApprox;
 
     // Multisampled render to single-sampled usage depends on the mandatory feature of
     // VK_EXT_multisampled_render_to_single_sampled.  Per format queries are needed to determine if
@@ -307,6 +319,11 @@ void VulkanCaps::init(const ContextOptions& contextOptions,
     fSupportsHostImageCopy = enabledFeatures.fHostImageCopy &&
                              deviceProperties.fHic.identicalMemoryTypeRequirements &&
                              deviceProperties.fHicHasShaderReadOnlyDstLayout;
+
+    fShaderReadOnlyLayoutSrcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    if (fComputeSupport) {
+        fShaderReadOnlyLayoutSrcStageMask |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    }
 
     // Note: Do not add extension/feature checks after this; driver workarounds should be done last.
     if (!contextOptions.fDisableDriverCorrectnessWorkarounds) {
@@ -348,12 +365,14 @@ VulkanCaps::EnabledFeatures VulkanCaps::getEnabledFeatures(
                     const auto* feature =
                             reinterpret_cast<const VkPhysicalDeviceVulkan13Features*>(pNext);
                     enabled.fPipelineCreationCacheControl = feature->pipelineCreationCacheControl;
+                    enabled.fSubgroupSizeControl = feature->subgroupSizeControl;
                     break;
                 }
                 case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES: {
                     const auto* feature =
                             reinterpret_cast<const VkPhysicalDeviceVulkan14Features*>(pNext);
                     enabled.fHostImageCopy = feature->hostImageCopy;
+                    enabled.fPipelineProtectedAccess = feature->pipelineProtectedAccess;
                     break;
                 }
                 case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES: {
@@ -361,6 +380,19 @@ VulkanCaps::EnabledFeatures VulkanCaps::getEnabledFeatures(
                             reinterpret_cast<
                                 const VkPhysicalDevicePipelineCreationCacheControlFeatures*>(pNext);
                     enabled.fPipelineCreationCacheControl = feature->pipelineCreationCacheControl;
+                    break;
+                }
+                case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES: {
+                    const auto* feature =
+                            reinterpret_cast<const VkPhysicalDeviceSubgroupSizeControlFeatures*>(
+                                    pNext);
+                    enabled.fSubgroupSizeControl = feature->subgroupSizeControl;
+                    break;
+                }
+                case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR: {
+                    const auto* feature = reinterpret_cast<
+                            const VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR*>(pNext);
+                    enabled.fShaderMaximalReconvergence = feature->shaderMaximalReconvergence;
                     break;
                 }
                 case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES: {
@@ -452,6 +484,12 @@ VulkanCaps::EnabledFeatures VulkanCaps::getEnabledFeatures(
                     enabled.fProtectedMemory = feature->protectedMemory;
                     break;
                 }
+                case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_PROTECTED_ACCESS_FEATURES_EXT: {
+                    const auto *feature = reinterpret_cast<
+                            const VkPhysicalDevicePipelineProtectedAccessFeaturesEXT*>(pNext);
+                    enabled.fPipelineProtectedAccess = feature->pipelineProtectedAccess;
+                    break;
+                }
                 default:
                     break;
             }
@@ -486,6 +524,11 @@ void VulkanCaps::getProperties(const skgpu::VulkanInterface* vkInterface,
     props->fHic.copyDstLayoutCount = kHicCopyDstLayoutMax;
     props->fHic.pCopyDstLayouts = hicCopyDstLayoutStorage;
 
+    // Core in Vulkan 1.1, which Graphite requires, so this can always be chained.
+    props->fSubgroup = {};
+    props->fSubgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+    AddToPNextChain(&props->fBase, &props->fSubgroup);
+
     const bool hasDriverProperties =
             physicalDeviceVersion >= VK_API_VERSION_1_2 ||
             extensions->hasExtension(VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME, 1);
@@ -514,10 +557,10 @@ void VulkanCaps::getProperties(const skgpu::VulkanInterface* vkInterface,
         // pCopyDstLayouts respectively.  The GENERAL layout is required to be found in both.  Skia
         // has two use cases for this function; initialization (UNDEFINED->GENERAL) and after
         // texture updates (GENERAL->SHADER_READ_ONLY, per Recorder::update*BackendTexture).
-        props->fHicHasShaderReadOnlyDstLayout =
-                std::find(props->fHic.pCopyDstLayouts,
-                          props->fHic.pCopyDstLayouts + props->fHic.copyDstLayoutCount,
-                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        props->fHicHasShaderReadOnlyDstLayout = std::find(
+                props->fHic.pCopyDstLayouts,
+                SK_UNSAFE_TODO(props->fHic.pCopyDstLayouts + props->fHic.copyDstLayoutCount),
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 
     // If this field is not filled, driver bug workarounds won't work correctly. It should always
@@ -568,6 +611,25 @@ void VulkanCaps::getProperties(const skgpu::VulkanInterface* vkInterface,
     }
 }
 
+namespace {
+
+bool is_adreno_6xx_proprietary(uint32_t deviceID) {
+    // According to Gemini (with poor citations), the format follows this pattern:
+    //     0x0 + [Series Core] + [Major Tier] + [Minor Revision/Patch]
+    // For the Adreno660, it maps series 6, tier 60, revision 01 -> 0x06060001.
+    // For the Adreno640, it maps series 6, tier 40, revision 01 -> 0x06040001.
+    // For the Adreno620, it maps series 6, tier 20, revision 00 -> 0x06020000.
+    // For the Adreno610, it maps series 6, tier 10, revision 01 -> 0x06010000.
+    //
+    // NOTE: This applies to the proprietary QC driver. Turnip supposedly just reports the GPU
+    // number directly, e.g. 640.
+    static constexpr uint32_t kAdreno6xxMask = 0xFFF00000; // Selects what should be 0x060
+    static constexpr uint32_t kAdreno6xxId   = 0x06000000;
+    return (deviceID & kAdreno6xxMask) == kAdreno6xxId;
+}
+
+} // anonymous namespace
+
 void VulkanCaps::applyDriverCorrectnessWorkarounds(const PhysicalDeviceProperties& properties) {
     // By default, we initialize the Android API version to 0 since we consider certain things
     // "fixed" only once above a certain version. This way, we default to enabling the workarounds.
@@ -581,6 +643,7 @@ void VulkanCaps::applyDriverCorrectnessWorkarounds(const PhysicalDevicePropertie
 #endif
 
     const uint32_t vendorID = properties.fBase.properties.vendorID;
+    const uint32_t deviceID = properties.fBase.properties.deviceID;
     const VkDriverId driverID = properties.fDriver.driverID;
     const skgpu::DriverVersion driverVersion =
             skgpu::ParseVulkanDriverVersion(driverID, properties.fBase.properties.driverVersion);
@@ -588,6 +651,9 @@ void VulkanCaps::applyDriverCorrectnessWorkarounds(const PhysicalDevicePropertie
     const bool isARM = skgpu::kARM_VkVendor == vendorID;
     const bool isIntel = skgpu::kIntel_VkVendor == vendorID;
     const bool isQualcomm = skgpu::kQualcomm_VkVendor == vendorID;
+    const bool isImagination = skgpu::kImagination_VkVendor == vendorID;
+
+    const bool isSwiftshader = skgpu::kGoogle_VkVendor == vendorID && 0xC0DE == deviceID;
 
     const bool isARMProprietary = isARM && VK_DRIVER_ID_ARM_PROPRIETARY == driverID;
     const bool isIntelWindowsProprietary =
@@ -609,11 +675,22 @@ void VulkanCaps::applyDriverCorrectnessWorkarounds(const PhysicalDevicePropertie
     // msaa image into the resolve image. This was reproed on a Pixel4 using the DstReadShuffle GM
     // where the top half of the GM would drop out. In Ganesh we had also seen this on Arm devices,
     // but the issue hasn't appeared yet in Graphite. It may just have occurred on older Arm drivers
-    // that we don't even test any more. This also occurs on swiftshader: b/303705884 in Ganesh, but
-    // we aren't currently testing that in Graphite yet so leaving that off the workaround for now
-    // until we run into it.
-    if (isQualcommProprietary) {
+    // that we don't even test any more.
+    // On Imagination (PowerVR) GPUs, using discardable MSAA attachments and loading from resolve in
+    // DMSAA subpasses causes 3D MMU page faults and GPU lockups.
+    // This also occurs on swiftshader, see b/303705884.
+    if (isQualcommProprietary || isImagination || isSwiftshader) {
         fMustLoadFullImageForMSAA = true;
+    }
+
+    // Adreno 620s render garbage when attachment sizes aren't identical; likely an issue with
+    // how the subpass load coordinates are calculated, or how the resolve addresses are handled.
+    // Conservatively disable for all 6xx using QC's driver (not tested on Turnip).
+    //
+    // Swiftshader segfaults when using attachments larger than the framebuffer.
+    if ((isQualcommProprietary && is_adreno_6xx_proprietary(deviceID)) ||
+        driverID == VK_DRIVER_ID_GOOGLE_SWIFTSHADER) {
+        fAttachmentSizePolicy = AttachmentSizePolicy::kExact;
     }
 
     // MSAA doesn't work well on Intel GPUs crbug.com/40434119, crbug.com/41470715
@@ -657,9 +734,19 @@ void VulkanCaps::applyDriverCorrectnessWorkarounds(const PhysicalDevicePropertie
     if (isQualcommProprietary && driverVersion < skgpu::DriverVersion(512, 822)) {
         fMSAARenderToSingleSampledSupport = false;
     }
+
+#if defined(SK_BUILD_FOR_ANDROID)
+    // Dawn doesn't use SPIR-V maximal reconvergence on Android Imagination GPUs (Pixel 10),
+    // crbug.com/379673383. Follow suit; compute shaders force reconvergence with barriers instead.
+    if (isImagination) {
+        fShaderCaps->fSubgroupMaximalReconvergence = false;
+    }
+#endif
 }
 
-void VulkanCaps::initShaderCaps(const EnabledFeatures enabledFeatures, const uint32_t vendorID) {
+void VulkanCaps::initShaderCaps(const EnabledFeatures enabledFeatures,
+                                const uint32_t vendorID,
+                                const VkPhysicalDeviceSubgroupProperties& subgroupProperties) {
     // TODO(skbug.com/40045541): We must force std430 array stride when using SSBOs since SPIR-V
     // generation cannot handle mixed array strides being passed into functions.
     fShaderCaps->fForceStd430ArrayLayout =
@@ -669,6 +756,32 @@ void VulkanCaps::initShaderCaps(const EnabledFeatures enabledFeatures, const uin
     // (skbug.com/421927604)
     fShaderCaps->fCannotUseRelaxedPrecisionOnImageSample = vendorID == kNvidia_VkVendor;
     fShaderCaps->fDualSourceBlendingSupport = enabledFeatures.fDualSrcBlend;
+
+    // Subgroup support requirements:
+    // - SkSL exposes subgroups in compute shaders only, so only the compute stage is required
+    //   (Dawn additionally requires fragment).
+    // - fSubgroupSupport covers every operation family that SkSL can emit, so all of them are
+    //   required. Quad and relative-shuffle operations are not exposed by SkSL and not required
+    //   (Dawn requires both for WGSL).
+    // - subgroupSizeControl (VK_EXT_subgroup_size_control or Vulkan 1.3) is mandatory so that
+    //   compute pipelines can control and query the subgroup size, matching Dawn.
+    //   VulkanPreferredFeatures enables it when available. computeFullSubgroups is not required.
+    // - SkSL's half lowers to 32-bit float with RelaxedPrecision in SPIR-V, so
+    //   shaderSubgroupExtendedTypes is not needed (Dawn needs it for f16).
+    constexpr VkSubgroupFeatureFlags kRequiredSubgroupOps =
+            VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
+            VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT |
+            VK_SUBGROUP_FEATURE_SHUFFLE_BIT;
+    fShaderCaps->fSubgroupSupport =
+            fComputeSupport && enabledFeatures.fSubgroupSizeControl &&
+            (subgroupProperties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) &&
+            (subgroupProperties.supportedOperations & kRequiredSubgroupOps) == kRequiredSubgroupOps;
+
+    // Maximal reconvergence is optional; without it, compute shaders force reconvergence with
+    // barriers. VulkanPreferredFeatures enables VK_KHR_shader_maximal_reconvergence when available,
+    // and the SPIR-V generator opts compute shaders into it (MaximallyReconvergesKHR) when set.
+    fShaderCaps->fSubgroupMaximalReconvergence =
+            fShaderCaps->fSubgroupSupport && enabledFeatures.fShaderMaximalReconvergence;
 }
 
 void VulkanCaps::initFormatTable(const skgpu::VulkanInterface* interface,
@@ -1137,18 +1250,19 @@ bool VulkanCaps::extractGraphicsDescs(const UniqueKey& key,
 
     const uint32_t* rawKeyData = key.data();
 
-    SkASSERT(RenderStep::IsValidRenderStepID(rawKeyData[kPipelineKeyRenderStepIDIndex]));
-    RenderStep::RenderStepID renderStepID =
-            static_cast<RenderStep::RenderStepID>(rawKeyData[kPipelineKeyRenderStepIDIndex]);
+    SkASSERT(RenderStep::IsValidRenderStepID(
+            SK_UNSAFE_TODO(rawKeyData[kPipelineKeyRenderStepIDIndex])));
+    RenderStep::RenderStepID renderStepID = static_cast<RenderStep::RenderStepID>(
+            SK_UNSAFE_TODO(rawKeyData[kPipelineKeyRenderStepIDIndex]));
 
-    *pipelineDesc =
-            GraphicsPipelineDesc(renderStepID,
-                                 UniquePaintParamsID(rawKeyData[kPipelineKeyPaintParamsIDIndex]));
+    *pipelineDesc = GraphicsPipelineDesc(
+            renderStepID,
+            UniquePaintParamsID(SK_UNSAFE_TODO(rawKeyData[kPipelineKeyPaintParamsIDIndex])));
 
-    const uint32_t rpDescBits = rawKeyData[kPipelineKeyRenderPassDescIndex];
+    const uint32_t rpDescBits = SK_UNSAFE_TODO(rawKeyData[kPipelineKeyRenderPassDescIndex]);
     VulkanRenderPass::ExtractRenderPassDesc(
             rpDescBits,
-            SwizzleCtorAccessor::Make(rawKeyData[kPipelineKeyWriteSwizzleIndex]),
+            SwizzleCtorAccessor::Make(SK_UNSAFE_TODO(rawKeyData[kPipelineKeyWriteSwizzleIndex])),
             this->getDstReadStrategy(),
             renderPassDesc);
 
@@ -1163,6 +1277,23 @@ bool VulkanCaps::extractGraphicsDescs(const UniqueKey& key,
     }
 
     return true;
+}
+
+UniqueKey VulkanCaps::makeComputePipelineKey(const ComputePipelineDesc& pipelineDesc) const {
+    UniqueKey pipelineKey;
+    {
+        static const skgpu::UniqueKey::Domain kComputePipelineDomain = UniqueKey::GenerateDomain();
+        // The key is made up of a single uint32_t corresponding to the compute step ID.
+        UniqueKey::Builder builder(&pipelineKey, kComputePipelineDomain, 1, "ComputePipeline");
+        builder[0] = pipelineDesc.computeStep()->uniqueID();
+
+        // TODO(b/240615224): The local work group size should factor into the key here since it is
+        // specified in the shader text on Vulkan/SPIR-V. This is not a problem right now since
+        // ComputeSteps don't vary their workgroup size dynamically.
+
+        builder.finish();
+    }
+    return pipelineKey;
 }
 
 void VulkanCaps::buildKeyForTexture(SkISize dimensions,

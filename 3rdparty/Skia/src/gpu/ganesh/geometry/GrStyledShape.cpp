@@ -15,6 +15,7 @@
 #include "include/private/SkDebug.h"
 #include "include/private/SkIDChangeListener.h"
 #include "include/private/SkMalloc.h"
+#include "include/private/SkOnlyStackAllocatable.h"
 #include "include/private/SkTo.h"
 
 #include <algorithm>
@@ -179,7 +180,7 @@ uint16_t GrStyledShape::unstyledKeySize() const {
             if (dataKeySize >= 0) {
                 count += SkTo<uint16_t>(dataKeySize);
             } else {
-                count++; // Just adds the gen ID.
+                count += sizeof(uint64_t) / sizeof(uint32_t); // Just adds the gen ID.
             }
             break; }
         default:
@@ -218,7 +219,8 @@ void GrStyledShape::writeUnstyledKey(uint32_t* key) const {
                     write_path_key_from_data(fShape.path(), key);
                     return;
                 } else {
-                    *key++ = fGenID;
+                    memcpy(key, &fGenID, sizeof(uint64_t));
+                    key += sizeof(uint64_t) / sizeof(uint32_t);
                 }
                 break; }
             case GrShape::Type::kPoint:
@@ -519,6 +521,8 @@ bool GrStyledShape::asNestedRects(SkRect rects[2]) const {
 
 class AutoRestoreInverseness {
 public:
+    SK_ONLY_STACK_ALLOCATABLE;
+
     AutoRestoreInverseness(GrShape* shape, const GrStyle& style)
             // Dashing ignores inverseness skbug.com/40036591.
             : fShape(shape), fInverted(!style.isDashed() && fShape->inverted()) {}

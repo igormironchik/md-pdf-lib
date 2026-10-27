@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.19)
 
-project(md-pdf-lib VERSION "1.0.1")
+project(md-pdf-lib VERSION "1.0.2")
 
 set(MD_PDF_LIB_VERSION ${PROJECT_VERSION} PARENT_SCOPE)
 

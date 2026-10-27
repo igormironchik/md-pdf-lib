@@ -4,16 +4,16 @@
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
-#include "src/gpu/graphite/DrawListLayer.h"
+#include "src/gpu/graphite/draw/DrawListLayer.h"
 
 #include "include/core/SkTypes.h"
 #include "include/gpu/graphite/Recorder.h"
 #include "src/core/SkTraceEvent.h"
-#include "src/gpu/graphite/DrawPass.h"
-#include "src/gpu/graphite/DrawWriter.h"
 #include "src/gpu/graphite/KeyContext.h"
 #include "src/gpu/graphite/RecorderPriv.h"
 #include "src/gpu/graphite/Renderer.h"
+#include "src/gpu/graphite/draw/DrawPass.h"
+#include "src/gpu/graphite/draw/DrawWriter.h"
 #include "src/gpu/graphite/geom/Geometry.h"
 
 namespace skgpu::graphite {
@@ -322,10 +322,11 @@ std::pair<DrawParams*, Layer*> DrawListLayer::recordDraw(const Renderer* rendere
 
 std::unique_ptr<DrawPass> DrawListLayer::snapDrawPass(Recorder* recorder,
                                                       StorageContext* storageContext,
+                                                      DrawContext* drawContext,
                                                       sk_sp<TextureProxy> target,
                                                       const SkImageInfo& targetInfo,
                                                       const DstReadStrategy dstReadStrategy) {
-    TRACE_EVENT1_ALWAYS("skia.gpu", TRACE_FUNC, "draw count", fDrawCount);
+    TRACE_EVENT1_ALWAYS("skia.gpu", "Snap DrawPass", "draw count", fDrawCount);
 
     std::unique_ptr<DrawPass> drawPass(new DrawPass(target,
                                                     {fLoadOp, StoreOp::kStore},
@@ -338,8 +339,7 @@ std::unique_ptr<DrawPass> DrawListLayer::snapDrawPass(Recorder* recorder,
 
     const bool rebindTexturesOnPipelineChange = dstReadStrategy == DstReadStrategy::kTextureCopy;
 
-    if (fStorageBufferSupport) {
-        SkASSERT(storageContext);
+    if (storageContext) {
         storageContext->finalizePrecachedStorageData();
     }
 
@@ -350,7 +350,6 @@ std::unique_ptr<DrawPass> DrawListLayer::snapDrawPass(Recorder* recorder,
     SkASSERT(drawPass->fTarget->isFullyLazy() ||
              SkIRect::MakeSize(drawPass->fTarget->dimensions()).contains(lastScissor));
     drawPass->fCommandList.setScissor(lastScissor);
-
     // Accumulate rough pixel area touched by each pipeline
     drawPass->fPipelineDrawAreas.push_back_n(fPipelineCache.count(), 0.f);
 
@@ -441,13 +440,22 @@ std::unique_ptr<DrawPass> DrawListLayer::snapDrawPass(Recorder* recorder,
 
     drawWriter.flush();
 
-    if (fStorageBufferSupport) {
-        SkASSERT(storageContext);
-        drawPass->fStorageBufferInfo = storageContext->finalize(bufferMgr);
-        if (!storageContext->isEmpty() && !drawPass->fStorageBufferInfo) SK_UNLIKELY {
+    if (bufferMgr->hasMappingFailed()) {
+        SKIA_LOG_W("Failed to write necessary vertex/instance data for DrawPass, dropping!");
+        this->reset(LoadOp::kLoad);
+        return nullptr;
+    }
+
+    if (storageContext) {
+        const bool hasStorageData = !storageContext->isEmpty();
+        auto storageResult = storageContext->finalize(recorder, drawContext);
+        if (hasStorageData && !storageResult) SK_UNLIKELY {
             SKIA_LOG_W("Failed to write Storage Data for Draw pass, dropping!");
             this->reset(LoadOp::kLoad);
             return nullptr;
+        }
+        if (storageResult) {
+            drawPass->setStorageResult(std::move(*storageResult));
         }
     }
 
@@ -455,20 +463,15 @@ std::unique_ptr<DrawPass> DrawListLayer::snapDrawPass(Recorder* recorder,
     drawPass->fPipelineDescs = fPipelineCache.detach();
     drawPass->fSampledTextures = fTextureDataCache.detachTextures();
 
-    TRACE_EVENT_INSTANT2_ALWAYS("skia.gpu",
-                                "DrawPass Stats",
-                                TRACE_EVENT_SCOPE_THREAD,
-                                "# commands", drawPass->fCommandList.count(),
-                                "# textures", drawPass->fSampledTextures.size());
+    TRACE_EVENT_INSTANT2("skia.gpu",
+                         "DrawPass Stats",
+                         TRACE_EVENT_SCOPE_THREAD,
+                         "# commands", drawPass->fCommandList.count(),
+                         "# textures", drawPass->fSampledTextures.size());
 
     this->reset(LoadOp::kLoad);
 
-    if (bufferMgr->hasMappingFailed()) {
-        SKIA_LOG_W("Failed to write necessary vertex/instance data for DrawPass, dropping!");
-        return nullptr;
-    } else {
-        return drawPass;
-    }
+    return drawPass;
 }
 
 }  // namespace skgpu::graphite

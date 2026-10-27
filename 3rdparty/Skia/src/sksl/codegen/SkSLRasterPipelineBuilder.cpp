@@ -6,11 +6,10 @@
  */
 
 #include "src/sksl/codegen/SkSLRasterPipelineBuilder.h"
-#include <cstdint>
-#include <optional>
 
 #include "include/core/SkStream.h"
 #include "include/private/SkMalloc.h"
+#include "include/private/SkOnlyStackAllocatable.h"
 #include "include/private/SkTFitsIn.h"
 #include "include/private/SkTo.h"
 #include "src/core/SkArenaAlloc.h"
@@ -30,10 +29,13 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -343,6 +345,18 @@ bool Builder::simplifyImmediateUnmaskedOp() {
     return false;
 }
 
+// This function is used to guard peephole optimization sites. If it fails, fInstructions adds both
+// both instructions, but the count goes over INT_MAX and is caught downstream.
+static bool add_into(int* target, int delta) {
+    SkSafeMath safe;
+    int sum = safe.addInt(*target, delta);
+    if (!safe) {
+        return false;
+    }
+    *target = sum;
+    return true;
+}
+
 void Builder::discard_stack(int32_t count, int stackID) {
     // If we pushed something onto the stack and then immediately discarded part of it, we can
     // shrink or eliminate the push.
@@ -355,8 +369,10 @@ void Builder::discard_stack(int32_t count, int stackID) {
         switch (lastInstruction->fOp) {
             case BuilderOp::discard_stack:
                 // Our last op was actually a separate discard_stack; combine the discards.
-                lastInstruction->fImmA += count;
-                return;
+                if (add_into(&lastInstruction->fImmA, count)) {
+                    return;
+                }
+                break;
 
             case BuilderOp::push_clone:
             case BuilderOp::push_clone_from_stack:
@@ -646,8 +662,9 @@ void Builder::push_constant_i(int32_t val, int count) {
     if (count > 0) {
         if (Instruction* lastInstruction = this->lastInstruction()) {
             // If the previous op is pushing the same value, we can just push more of them.
-            if (lastInstruction->fOp == BuilderOp::push_constant && lastInstruction->fImmB == val) {
-                lastInstruction->fImmA += count;
+            if (lastInstruction->fOp == BuilderOp::push_constant &&
+                lastInstruction->fImmB == val &&
+                add_into(&lastInstruction->fImmA, count)) {
                 return;
             }
         }
@@ -658,8 +675,8 @@ void Builder::push_constant_i(int32_t val, int count) {
 void Builder::push_duplicates(int count) {
     if (Instruction* lastInstruction = this->lastInstruction()) {
         // If the previous op is pushing a constant, we can just push more of them.
-        if (lastInstruction->fOp == BuilderOp::push_constant) {
-            lastInstruction->fImmA += count;
+        if (lastInstruction->fOp == BuilderOp::push_constant &&
+            add_into(&lastInstruction->fImmA, count)) {
             return;
         }
     }
@@ -687,9 +704,9 @@ void Builder::push_clone(int numSlots, int offsetFromStackTop) {
     if (numSlots == 1 && offsetFromStackTop == 0) {
         // ... and the previous op is pushing a constant...
         if (Instruction* lastInstruction = this->lastInstruction()) {
-            if (lastInstruction->fOp == BuilderOp::push_constant) {
+            if (lastInstruction->fOp == BuilderOp::push_constant &&
+                add_into(&lastInstruction->fImmA, 1)) {
                 // ... we can just push more of them.
-                lastInstruction->fImmA += 1;
                 return;
             }
         }
@@ -1145,12 +1162,12 @@ void Builder::swizzle(int consumedSlots, SkSpan<const int8_t> components) {
 
     // We only allow up to 16 elements, and they can only reach 0-15 slots, due to nybble packing.
     int numElements = components.size();
-    SkASSERT(numElements <= 16);
+    SkASSERT_RELEASE(numElements <= 16);
     SkASSERT(std::all_of(components.begin(), components.end(), [](int8_t e){ return e >= 0; }));
     SkASSERT(std::all_of(components.begin(), components.end(), [](int8_t e){ return e <= 0xF; }));
 
     // Make a local copy of the element array.
-    int8_t elements[16] = {};
+    std::array<int8_t, 16> elements = {};
     std::copy(components.begin(), components.end(), std::begin(elements));
 
     while (numElements > 0) {
@@ -1159,7 +1176,9 @@ void Builder::swizzle(int consumedSlots, SkSpan<const int8_t> components) {
             break;
         }
         // ...and zero isn't used elsewhere in the swizzle...
-        if (std::any_of(&elements[1], &elements[numElements], [](int8_t e) { return e == 0; })) {
+        if (std::any_of(elements.begin() + 1, elements.begin() + numElements, [](int8_t e) {
+                return e == 0;
+            })) {
             break;
         }
         // We can omit the first slot from the swizzle entirely.
@@ -1181,46 +1200,50 @@ void Builder::swizzle(int consumedSlots, SkSpan<const int8_t> components) {
     if (consumedSlots <= 4 && numElements <= 4) {
         // We can fit everything into a little swizzle.
         int op = (int)BuilderOp::swizzle_1 + numElements - 1;
-        this->appendInstruction((BuilderOp)op, {}, consumedSlots,
-                                pack_nybbles(SkSpan(elements, numElements)));
+        this->appendInstruction((BuilderOp)op,
+                                {},
+                                consumedSlots,
+                                pack_nybbles(SkSpan(elements).first(numElements)));
         return;
     }
 
     // This is a big swizzle. We use the `shuffle` op to handle these. immA counts the consumed
     // slots. immB counts the generated slots. immC and immD hold packed-nybble shuffle values.
-    this->appendInstruction(BuilderOp::shuffle, {},
-                            consumedSlots, numElements,
-                            pack_nybbles(SkSpan(&elements[0], 8)),
-                            pack_nybbles(SkSpan(&elements[8], 8)));
+    this->appendInstruction(BuilderOp::shuffle,
+                            {},
+                            consumedSlots,
+                            numElements,
+                            pack_nybbles(SkSpan(elements).first(8)),
+                            pack_nybbles(SkSpan(elements).subspan(8)));
 }
 
 void Builder::transpose(int columns, int rows) {
     // Transposes a matrix of size CxR on the stack (into a matrix of size RxC).
-    int8_t elements[16] = {};
+    std::array<int8_t, 16> elements = {};
     size_t index = 0;
     for (int r = 0; r < rows; ++r) {
         for (int c = 0; c < columns; ++c) {
             elements[index++] = (c * rows) + r;
         }
     }
-    this->swizzle(/*consumedSlots=*/columns * rows, SkSpan(elements, index));
+    this->swizzle(/*consumedSlots=*/columns * rows, SkSpan(elements).first(index));
 }
 
 void Builder::diagonal_matrix(int columns, int rows) {
     // Generates a CxR diagonal matrix from the top two scalars on the stack.
-    int8_t elements[16] = {};
+    std::array<int8_t, 16> elements = {};
     size_t index = 0;
     for (int c = 0; c < columns; ++c) {
         for (int r = 0; r < rows; ++r) {
             elements[index++] = (c == r) ? 1 : 0;
         }
     }
-    this->swizzle(/*consumedSlots=*/2, SkSpan(elements, index));
+    this->swizzle(/*consumedSlots=*/2, SkSpan(elements).first(index));
 }
 
 void Builder::matrix_resize(int origColumns, int origRows, int newColumns, int newRows) {
     // Resizes a CxR matrix at the top of the stack to C'xR'.
-    int8_t elements[16] = {};
+    std::array<int8_t, 16> elements = {};
     size_t index = 0;
 
     size_t consumedSlots = origColumns * origRows;
@@ -1251,7 +1274,7 @@ void Builder::matrix_resize(int origColumns, int origRows, int newColumns, int n
             }
         }
     }
-    this->swizzle(consumedSlots, SkSpan(elements, index));
+    this->swizzle(consumedSlots, SkSpan(elements).first(index));
 }
 
 void Builder::matrix_multiply(int leftColumns, int leftRows, int rightColumns, int rightRows) {
@@ -1277,7 +1300,7 @@ std::unique_ptr<Program> Builder::finish(int numValueSlots,
                                      numImmutableSlots, fNumLabels, debugTrace);
 }
 
-static int stack_usage(const Instruction& inst) {
+static int stack_usage(const Instruction& inst, SkSafeMath* safe) {
     switch (inst.fOp) {
         case BuilderOp::push_condition_mask:
         case BuilderOp::push_loop_mask:
@@ -1316,20 +1339,20 @@ static int stack_usage(const Instruction& inst) {
         case ALL_MULTI_SLOT_BINARY_OP_CASES:
         case BuilderOp::discard_stack:
         case BuilderOp::select:
-            return -inst.fImmA;
+            return safe->subInt(0, inst.fImmA);
 
         case ALL_N_WAY_TERNARY_OP_CASES:
         case ALL_MULTI_SLOT_TERNARY_OP_CASES:
-            return 2 * -inst.fImmA;
+            return safe->mulInt(-2, inst.fImmA);
 
         case BuilderOp::swizzle_1:
-            return 1 - inst.fImmA;  // consumes immA slots and emits a scalar
+            return safe->subInt(1, inst.fImmA);  // consumes immA slots and emits a scalar
         case BuilderOp::swizzle_2:
-            return 2 - inst.fImmA;  // consumes immA slots and emits a 2-slot vector
+            return safe->subInt(2, inst.fImmA);  // consumes immA slots and emits a 2-slot vector
         case BuilderOp::swizzle_3:
-            return 3 - inst.fImmA;  // consumes immA slots and emits a 3-slot vector
+            return safe->subInt(3, inst.fImmA);  // consumes immA slots and emits a 3-slot vector
         case BuilderOp::swizzle_4:
-            return 4 - inst.fImmA;  // consumes immA slots and emits a 4-slot vector
+            return safe->subInt(4, inst.fImmA);  // consumes immA slots and emits a 4-slot vector
 
         case BuilderOp::dot_2_floats:
             return -3;  // consumes two 2-slot vectors and emits one scalar
@@ -1345,12 +1368,13 @@ static int stack_usage(const Instruction& inst) {
         case BuilderOp::matrix_multiply_3:
         case BuilderOp::matrix_multiply_4:
             // consumes the left- and right-matrices; emits result over existing padding slots
-            return -(inst.fImmA * inst.fImmB + inst.fImmC * inst.fImmD);
+            return safe->subInt(0, safe->addInt(safe->mulInt(inst.fImmA, inst.fImmB),
+                                                safe->mulInt(inst.fImmC, inst.fImmD)));
 
         case BuilderOp::shuffle: {
             int consumed = inst.fImmA;
             int generated = inst.fImmB;
-            return generated - consumed;
+            return safe->subInt(generated, consumed);
         }
         case ALL_SINGLE_SLOT_UNARY_OP_CASES:
         case ALL_MULTI_SLOT_UNARY_OP_CASES:
@@ -1358,6 +1382,11 @@ static int stack_usage(const Instruction& inst) {
         default:
             return 0;
     }
+}
+
+static int stack_usage(const Instruction& inst) {
+    SkSafeMath safe;
+    return stack_usage(inst, &safe);
 }
 
 Program::StackDepths Program::tempStackMaxDepths() const {
@@ -1372,9 +1401,14 @@ Program::StackDepths Program::tempStackMaxDepths() const {
     largest.push_back_n(numStacks, 0);
     current.push_back_n(numStacks, 0);
 
+    SkSafeMath safe;
     for (const Instruction& inst : fInstructions) {
         int stackID = inst.fStackID;
-        current[stackID] += stack_usage(inst);
+        current[stackID] = safe.addInt(current[stackID], stack_usage(inst, &safe));
+        if (!safe) {
+            largest[stackID] = -1;
+            return largest;
+        }
         largest[stackID] = std::max(current[stackID], largest[stackID]);
         // If we assert here, the generated program has popped off the top of the stack.
         SkASSERTF_RELEASE(current[stackID] >= 0, "unbalanced temp stack push/pop on stack");
@@ -1403,9 +1437,18 @@ Program::Program(TArray<Instruction> instrs,
         , fDebugTrace(debugTrace) {
     fTempStackMaxDepths = this->tempStackMaxDepths();
 
+    SkSafeMath safe;
     fNumTempStackSlots = 0;
     for (const int depth : fTempStackMaxDepths) {
-        fNumTempStackSlots += depth;
+        if (depth < 0) {
+            fNumTempStackSlots = -1;
+            break;
+        }
+        fNumTempStackSlots = safe.addInt(fNumTempStackSlots, depth);
+        if (!safe) {
+            fNumTempStackSlots = -1;
+            break;
+        }
     }
 
     if (fDebugTrace) {
@@ -1666,6 +1709,13 @@ static void* context_bit_pun(intptr_t val) {
 }
 
 std::optional<Program::SlotData> Program::allocateSlotData(SkArenaAlloc* alloc) const {
+    if (fNumValueSlots < 0 ||
+        fNumUniformSlots < 0 ||
+        fNumTempStackSlots < 0 ||
+        fNumImmutableSlots < 0 ||
+        fNumLabels < 0) {
+        return std::nullopt;
+    }
     // Allocate a contiguous slab of slot data for immutables, values, and stack entries.
     const size_t N = SkOpts::raster_pipeline_highp_stride;
     const int scalarWidth = 1 * sizeof(float);
@@ -2482,6 +2532,8 @@ void Program::makeStages(TArray<Stage>* pipeline,
 
 class Program::Dumper {
 public:
+    SK_ONLY_STACK_ALLOCATABLE;
+
     Dumper(const Program& p) : fProgram(p) {}
 
     void dump(SkWStream* out, bool writeInstructionCount);

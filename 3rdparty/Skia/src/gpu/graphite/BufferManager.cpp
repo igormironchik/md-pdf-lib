@@ -10,6 +10,7 @@
 #include "include/gpu/graphite/Recording.h"
 #include "include/private/SkAlign.h"
 #include "include/private/SkAssert.h"
+#include "include/private/SkAttributes.h"
 #include "include/private/SkLog.h"
 #include "include/private/SkMath.h"
 #include "include/private/SkTo.h"
@@ -40,10 +41,10 @@ namespace {
 // The limit for all data created by the StaticBufferManager. This data remains alive for
 // the entire SharedContext so we want to keep it small and give a concrete upper bound to
 // clients for our steady-state memory usage.
-// FIXME The current usage is 4732 bytes across static vertex and index buffers, but that includes
+// FIXME The current usage is 6308 bytes across static vertex and index buffers, but that includes
 // multiple copies of tessellation data, and an unoptimized AnalyticRRect mesh. Once those issues
 // are addressed, we can tighten this and decide on the transfer buffer sizing as well.
-[[maybe_unused]] static constexpr uint32_t kMaxStaticDataSize = 6 << 10;
+[[maybe_unused]] static constexpr uint32_t kMaxStaticDataSize = 7 << 10;
 
 // Helpers for creating a BufferState based on type, options, and caps
 
@@ -534,7 +535,7 @@ VertexWriter StaticBufferManager::getVertexWriter(size_t count,
     if (alignedCount > count) {
         const uint32_t byteDiff = (alignedCount - count) * stride;
         void* zPtr = SkTAddOffset<void>(data, count * stride);
-        memset(zPtr, 0, byteDiff);
+        SK_UNSAFE_TODO(memset(zPtr, 0, byteDiff));
     }
     return VertexWriter{data, size};
 }

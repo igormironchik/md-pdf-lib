@@ -9,7 +9,9 @@
 #include "include/core/SkStream.h"
 #include "include/gpu/ShaderErrorHandler.h"
 #include "include/gpu/graphite/Context.h"
+#include "include/gpu/graphite/ContextOptions.h"
 #include "include/gpu/graphite/mtl/MtlBackendContext.h"
+#include "src/core/SkContextPriv.h"
 #include "src/core/SkTraceEvent.h"
 #include "src/gpu/graphite/ContextPriv.h"
 #include "src/gpu/graphite/TextureFormat.h"
@@ -23,8 +25,14 @@
 namespace SkContexts {
 // Creates a context wrapping a Graphite GPU backend using Metal
 std::unique_ptr<SkContext> MakeGraphite(const skgpu::graphite::MtlBackendContext& mtlContext,
-                              const SkContextOptions& options) {
-    return nullptr;
+                                        const SkContextOptions& contextOptions,
+                                        const skgpu::graphite::ContextOptions& graphiteOptions) {
+    auto context = skgpu::graphite::ContextFactory::MakeMetal(mtlContext, graphiteOptions);
+    if (!context) {
+        return nullptr;
+    }
+    return SkContextCtorAccessor::MakeContext(
+            contextOptions, skgpu::graphite::ContextPriv::AsGPUContext(std::move(context)));
 }
 
 }  // namespace SkContexts
@@ -67,14 +75,7 @@ sk_cfp<id<MTLLibrary>> MtlCompileShaderLibrary(const MtlSharedContext* sharedCon
         return nil;
     }
     MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
-
-    // Framebuffer fetch is supported in MSL 2.3 in MacOS 11+.
-    if (@available(macOS 11.0, iOS 14.0, tvOS 14.0, *)) {
-        options.languageVersion = MTLLanguageVersion2_3;
-    } else {
-        // Supported by iOS 13, Graphite's minimum iOS version
-        options.languageVersion = MTLLanguageVersion2_2;
-    }
+    options.languageVersion = MTLLanguageVersion2_3;
 
     NSError* error = nil;
     // TODO: do we need a version with a timeout?
