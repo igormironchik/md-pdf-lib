@@ -88,12 +88,6 @@ SPDX-FileCopyrightText = "2018 Volodymyr Bilonenko"
 SPDX-License-Identifier = "MIT"
 
 [[annotations]]
-path = "3rdparty/Skia/third_party/externals/dng_sdk/**"
-precedence = "override"
-SPDX-FileCopyrightText = "Adobe Systems Incorporated"
-SPDX-License-Identifier = "LicenseRef-Adobe-DNG-SDK"
-
-[[annotations]]
 path = "3rdparty/Skia/third_party/externals/egl-registry/**"
 precedence = "override"
 SPDX-FileCopyrightText = "The Khronos Group Inc."

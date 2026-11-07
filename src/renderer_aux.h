@@ -47,8 +47,10 @@
 #include <string_view>
 #include <vector>
 
+// REUSE-IgnoreStart
 // Copyright (C) 2016 The Qt Company Ltd.
 // SPDX-License-Identifier: LicenseRef-Qt-Commercial OR LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only
+// REUSE-IgnoreEnd
 QByteArray qt_inflateSvgzDataFrom(QIODevice *device,
                                   bool doCheckContent);
 
