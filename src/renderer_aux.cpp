@@ -438,7 +438,8 @@ void PdfAuxData::freeSpaceOn(int page)
 
 void PdfAuxData::drawBlob(double x,
                           const sk_sp<SkTextBlob> &blob,
-                          bool strikeout)
+                          bool strikeout,
+                          const Utf8String &str)
 {
     m_firstOnPage = false;
 
@@ -446,14 +447,20 @@ void PdfAuxData::drawBlob(double x,
     paint.setAntiAlias(true);
 
 #ifndef MD_PDF_TESTING
+    Q_UNUSED(str)
+
     (*m_pages)[m_currentPainterIdx].m_canvas->drawTextBlob(blob, x, 0.0, paint);
 #else
     if (m_printDrawings) {
-        (*m_drawingsStream) << QStringLiteral("Blob 0 \"\" %1 %2 0.0 0.0 %3 %4 0.0 0.0\n")
+        const auto s = QString::fromUtf8(str.data);
+
+        (*m_drawingsStream) << QStringLiteral("Blob %5 \"%6\" %1 %2 0.0 0.0 %3 %4 0.0 0.0\n")
                                    .arg(QString::number(x, 'f', 16),
                                         QString::number(blob->bounds().y(), 'f', 16),
                                         QString::number(blob->bounds().width(), 'f', 16),
-                                        QString::number(blob->bounds().height(), 'f', 16));
+                                        QString::number(blob->bounds().height(), 'f', 16),
+                                        QString::number(s.length()),
+                                        s);
     } else {
         (*m_pages)[m_currentPainterIdx].m_canvas->drawTextBlob(blob, x, 0.0, paint);
 
@@ -463,6 +470,7 @@ void PdfAuxData::drawBlob(double x,
 
         int pos = m_testPos++;
         QCOMPARE(DrawPrimitive::Type::Blob, m_testData.at(pos).m_type);
+        QCOMPARE(QString::fromUtf8(str.data), m_testData.at(pos).m_text);
         QCOMPARE(x, m_testData.at(pos).m_x);
         QCOMPARE(blob->bounds().y(), m_testData.at(pos).m_y);
         QCOMPARE(blob->bounds().width(), m_testData.at(pos).m_width);

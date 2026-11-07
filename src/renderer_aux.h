@@ -467,7 +467,8 @@ struct PdfAuxData {
     //! Draw blob.
     void drawBlob(double x,
                   const sk_sp<SkTextBlob> &blob,
-                  bool strikeout);
+                  bool strikeout,
+                  const Utf8String &str);
     //! Draw text
     void drawText(double x,
                   double y,
