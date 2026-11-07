@@ -75,5 +75,9 @@ rm -rf 3rdparty/Skia/third_party/externals/vulkan-utility-libraries
 rm -rf 3rdparty/Skia/third_party/externals/webgpu-headers
 rm -rf 3rdparty/Skia/third_party/externals/dng_sdk
 rm -rf 3rdparty/Skia/third_party/externals/piex
+rm -rf 3rdparty/Skia/third_party/externals/expat/testdata
+rm -rf 3rdparty/Skia/third_party/externals/harfbuzz/test
+rm -rf 3rdparty/Skia/third_party/externals/icu/source/data
+rm -rf 3rdparty/Skia/third_party/externals/icu/source/test
 rm -rf 3rdparty/Skia/tools
 rm -rf 3rdparty/Skia/tests
