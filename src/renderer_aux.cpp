@@ -806,79 +806,58 @@ void PdfAuxData::repeatColor()
     m_currentPaint.setColor(SkColorSetRGB(c.red(), c.green(), c.blue()));
 }
 
-TextBlobBuilderRunHandler::TextBlobBuilderRunHandler(const char *utf8Text,
+TextBlobBuilderRunHandler::TextBlobBuilderRunHandler(const char *utf8,
                                                      SkPoint offset)
-    : fUtf8Text(utf8Text)
-    , fOffset(offset)
+    : m_blobHandler(utf8,
+                    offset)
 {
 }
 
 sk_sp<SkTextBlob> TextBlobBuilderRunHandler::makeBlob()
 {
-    return fBuilder.make();
+    return m_blobHandler.makeBlob();
 }
 
 SkPoint TextBlobBuilderRunHandler::endPoint()
 {
-    return fOffset;
-}
-
-void TextBlobBuilderRunHandler::beginLine()
-{
-    fCurrentPosition = fOffset;
-    fMaxRunAscent = 0;
-    fMaxRunDescent = 0;
-    fMaxRunLeading = 0;
-}
-
-void TextBlobBuilderRunHandler::runInfo(const RunInfo &info)
-{
-    SkFontMetrics metrics;
-    info.fFont.getMetrics(&metrics);
-    fMaxRunAscent = std::min(fMaxRunAscent, metrics.fAscent);
-    fMaxRunDescent = std::max(fMaxRunDescent, metrics.fDescent);
-    fMaxRunLeading = std::max(fMaxRunLeading, metrics.fLeading);
-}
-
-void TextBlobBuilderRunHandler::commitRunInfo()
-{
-    fCurrentPosition.fY -= fMaxRunAscent;
-}
-
-TextBlobBuilderRunHandler::Buffer TextBlobBuilderRunHandler::runBuffer(const RunInfo &info)
-{
-    int glyphCount = SkTFitsIn<int>(info.glyphCount) ? info.glyphCount : INT_MAX;
-    int utf8RangeSize = SkTFitsIn<int>(info.utf8Range.size()) ? info.utf8Range.size() : INT_MAX;
-
-    const auto &runBuffer = fBuilder.allocRunTextPos(info.fFont, glyphCount, utf8RangeSize);
-    if (runBuffer.utf8text && fUtf8Text) {
-        memcpy(runBuffer.utf8text, fUtf8Text + info.utf8Range.begin(), utf8RangeSize);
-    }
-    fClusters = runBuffer.clusters;
-    fGlyphCount = glyphCount;
-    fClusterOffset = info.utf8Range.begin();
-
-    return {runBuffer.glyphs, runBuffer.points(), nullptr, runBuffer.clusters, fCurrentPosition};
-}
-
-void TextBlobBuilderRunHandler::commitRunBuffer(const RunInfo &info)
-{
-    SkASSERT(0 <= fClusterOffset);
-    for (int i = 0; i < fGlyphCount; ++i) {
-        SkASSERT(fClusters[i] >= (unsigned)fClusterOffset);
-        fClusters[i] -= fClusterOffset;
-    }
-    fCurrentPosition += info.fAdvance;
-}
-
-void TextBlobBuilderRunHandler::commitLine()
-{
-    fOffset += {0, fMaxRunDescent + fMaxRunLeading - fMaxRunAscent};
+    return m_blobHandler.endPoint();
 }
 
 SkScalar TextBlobBuilderRunHandler::horizontalAdvance() const
 {
-    return fCurrentPosition.fX;
+    return m_lineAdvance;
+}
+
+void TextBlobBuilderRunHandler::beginLine()
+{
+    m_lineAdvance = 0;
+    m_blobHandler.beginLine();
+}
+
+void TextBlobBuilderRunHandler::runInfo(const RunInfo &info)
+{
+    m_lineAdvance += info.fAdvance.fX;
+    m_blobHandler.runInfo(info);
+}
+
+void TextBlobBuilderRunHandler::commitRunInfo()
+{
+    m_blobHandler.commitRunInfo();
+}
+
+SkShaper::RunHandler::Buffer TextBlobBuilderRunHandler::runBuffer(const RunInfo &info)
+{
+    return m_blobHandler.runBuffer(info);
+}
+
+void TextBlobBuilderRunHandler::commitRunBuffer(const RunInfo &info)
+{
+    m_blobHandler.commitRunBuffer(info);
+}
+
+void TextBlobBuilderRunHandler::commitLine()
+{
+    m_blobHandler.commitLine();
 }
 
 bool PdfAuxData::shape(TextBlobBuilderRunHandler &handler,

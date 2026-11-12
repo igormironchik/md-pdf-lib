@@ -336,42 +336,29 @@ private:
     std::vector<Offset *> m_offset;
 }; // struct LayoutDirectionHandler
 
-/*
- * Copyright 2016 Google Inc.
- *
- * Use of this source code is governed by a BSD-style license that can be
- * found in the LICENSE file.
- */
-/**
- * Helper for shaping text directly into a SkTextBlob.
- */
+//
+// TextBlobBuilderRunHandler
+//
+
 class TextBlobBuilderRunHandler final : public SkShaper::RunHandler
 {
 public:
-    TextBlobBuilderRunHandler(const char *utf8Text,
+    TextBlobBuilderRunHandler(const char *utf8,
                               SkPoint offset);
-
     sk_sp<SkTextBlob> makeBlob();
     SkPoint endPoint();
+    SkScalar horizontalAdvance() const;
+
     void beginLine() override;
     void runInfo(const RunInfo &info) override;
     void commitRunInfo() override;
     Buffer runBuffer(const RunInfo &info) override;
     void commitRunBuffer(const RunInfo &info) override;
     void commitLine() override;
-    SkScalar horizontalAdvance() const;
 
 private:
-    SkTextBlobBuilder fBuilder;
-    char const *const fUtf8Text;
-    uint32_t *fClusters;
-    int fClusterOffset;
-    int fGlyphCount;
-    SkScalar fMaxRunAscent;
-    SkScalar fMaxRunDescent;
-    SkScalar fMaxRunLeading;
-    SkPoint fCurrentPosition;
-    SkPoint fOffset;
+    SkTextBlobBuilderRunHandler m_blobHandler;
+    SkScalar m_lineAdvance = 0;
 }; // TextBlobBuilderRunHandler
 
 //! Auxiliary struct for rendering.

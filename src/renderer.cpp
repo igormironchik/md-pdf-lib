@@ -2085,10 +2085,7 @@ void PdfRenderer::drawTextBlobOrText(PdfAuxData &pdfData,
         const auto blob = handler.makeBlob();
 
         if (blob) {
-            pdfData.drawBlob(pdfData.m_layout.startX(length),
-                             blob,
-                             strikeout,
-                             str);
+            pdfData.drawBlob(pdfData.m_layout.startX(length), blob, strikeout, str);
         } else {
             pdfData.drawText(pdfData.m_layout.startX(length),
                              pdfData.m_layout.y() - descent - baselineDelta,
