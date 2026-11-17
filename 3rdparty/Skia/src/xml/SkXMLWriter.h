@@ -10,10 +10,10 @@
 
 #include "include/core/SkString.h"
 #include "include/private/SkTDArray.h"
+#include "src/partition_alloc/raw_ref.h"
 #include "src/xml/SkDOM.h"
 
 class SkWStream;
-class SkXMLParser;
 
 class SkXMLWriter {
 public:
@@ -81,22 +81,8 @@ private:
     void newline();
     void tab(int lvl);
 
-    SkWStream&      fStream;
+    const raw_ref<SkWStream> fStream;
     const uint32_t  fFlags;
 };
-
-class SkXMLParserWriter : public SkXMLWriter {
-public:
-    SkXMLParserWriter(SkXMLParser*);
-    ~SkXMLParserWriter() override;
-protected:
-    void onStartElementLen(const char elem[], size_t length) override;
-    void onEndElement() override;
-    void onAddAttributeLen(const char name[], const char value[], size_t length) override;
-    void onAddText(const char text[], size_t length) override;
-private:
-    SkXMLParser&        fParser;
-};
-
 
 #endif

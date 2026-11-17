@@ -72,9 +72,11 @@
 #include "src/gpu/vk/VulkanUtilsPriv.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <functional>
 #include <numeric>
+#include <thread>
 #include <utility>
 
 class GrAttachment;
@@ -208,7 +210,7 @@ GrVkGpu::GrVkGpu(GrDirectContext* direct,
 
     fResourceProvider.init();
 
-    fMainCmdPool = fResourceProvider.findOrCreateCommandPool();
+    fMainCmdPool.reset(fResourceProvider.findOrCreateCommandPool());
     if (fMainCmdPool) {
         fMainCmdBuffer = fMainCmdPool->getPrimaryCommandBuffer();
         SkASSERT(this->currentCommandBuffer());
@@ -226,11 +228,8 @@ void GrVkGpu::destroyResources() {
     // wait for all commands to finish
     this->finishOutstandingGpuWork();
 
-    if (fMainCmdPool) {
-        fMainCmdBuffer = nullptr;
-        fMainCmdPool->unref();
-        fMainCmdPool = nullptr;
-    }
+    fMainCmdBuffer = nullptr;
+    fMainCmdPool.reset();
 
     for (int i = 0; i < fSemaphoresToWaitOn.size(); ++i) {
         fSemaphoresToWaitOn[i]->unref();
@@ -381,8 +380,9 @@ bool GrVkGpu::submitCommandBuffer(const GrSubmitInfo& submitInfo) {
     bool didSubmit = fMainCmdBuffer->submitToQueue(this, fQueue, fSemaphoresToSignal,
                                                    fSemaphoresToWaitOn, submitInfo);
 
+    bool syncSucceeded = true;
     if (didSubmit && submitInfo.fSync == GrSyncCpu::kYes) {
-        fMainCmdBuffer->forceSync(this);
+        syncSucceeded = fMainCmdBuffer->forceSync(this);
     }
 
     // We must delete any drawables that had to wait until submit to destroy.
@@ -408,21 +408,20 @@ bool GrVkGpu::submitCommandBuffer(const GrSubmitInfo& submitInfo) {
     fSemaphoresToSignal.clear();
 
     // Release old command pool and create a new one
-    fMainCmdPool->unref();
-    fMainCmdPool = fResourceProvider.findOrCreateCommandPool();
+    fMainCmdBuffer = nullptr;
+    fMainCmdPool.reset();
+    fMainCmdPool.reset(fResourceProvider.findOrCreateCommandPool());
     if (fMainCmdPool) {
         fMainCmdBuffer = fMainCmdPool->getPrimaryCommandBuffer();
         SkASSERT(fMainCmdBuffer);
         fMainCmdBuffer->begin(this);
-    } else {
-        fMainCmdBuffer = nullptr;
     }
     // We must wait to call checkCommandBuffers until after we get a new command buffer. The
     // checkCommandBuffers may trigger a releaseProc which may cause us to insert a barrier for a
     // released GrVkImage. That barrier needs to be put into a new command buffer and not the old
     // one that was just submitted.
     fResourceProvider.checkCommandBuffers();
-    return didSubmit;
+    return didSubmit && syncSucceeded;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -2234,10 +2233,16 @@ bool GrVkGpu::onSubmitToGpu(const GrSubmitInfo& info) {
 }
 
 void GrVkGpu::finishOutstandingGpuWork() {
-    VK_CALL(QueueWaitIdle(fQueue));
+    VkResult res;
+    VK_CALL_RET(res, QueueWaitIdle(fQueue));
 
     if (this->vkCaps().mustSyncCommandBuffersWithQueue()) {
         fResourceProvider.forceSyncAllCommandBuffers();
+    }
+
+    if (this->vkCaps().sleepAfterLostDeviceWait() &&
+        (res == VK_ERROR_DEVICE_LOST || this->isDeviceLost())) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 

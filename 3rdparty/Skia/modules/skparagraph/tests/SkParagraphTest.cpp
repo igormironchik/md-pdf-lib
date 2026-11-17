@@ -50,6 +50,7 @@
 
 #include <string.h>
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <string>
@@ -4753,6 +4754,215 @@ UNIX_ONLY_TEST(SkParagraph_LongWordParagraph, reporter) {
     }
 }
 
+// Text with no break opportunity is broken inside the word, once on every line. Each line is as
+// full as the width allows, and the word is measured the same at every width.
+UNIX_ONLY_TEST(SkParagraph_UnbreakableTextParagraph, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    TextStyle text_style;
+    text_style.setFontFamilies({SkString("Roboto")});
+    text_style.setFontSize(20);
+    text_style.setColor(SK_ColorBLACK);
+    ParagraphStyle paragraph_style;
+    paragraph_style.setTextStyle(text_style);
+    auto layout = [&](const std::string& text, SkScalar width) {
+        ParagraphBuilderImpl builder(paragraph_style, fontCollection, get_unicode());
+        builder.pushStyle(text_style);
+        builder.addText(text.data(), text.size());
+        auto paragraph = builder.Build();
+        paragraph->layout(width);
+        return paragraph;
+    };
+    auto repeat = [](const std::string& unit, size_t count) {
+        std::string text;
+        for (size_t i = 0; i < count; ++i) {
+            text += unit;
+        }
+        return text;
+    };
+    // Checks that the lines cover the text in order and fit the width. All lines but the last
+    // are full: the first cluster of the next line would not fit on them.
+    auto checkLines = [&](skiatest::Reporter* reporter,
+                          Paragraph* paragraph,
+                          size_t size,
+                          SkScalar width,
+                          bool full) {
+        auto impl = static_cast<ParagraphImpl*>(paragraph);
+        auto lines = impl->lines();
+        size_t start = 0;
+        for (size_t i = 0; i < lines.size(); ++i) {
+            auto& line = lines[i];
+            REPORTER_ASSERT(reporter, line.text().start == start);
+            start = line.text().end;
+            REPORTER_ASSERT(reporter, line.width() <= width + 0.25f);
+            if (full && i + 1 < lines.size()) {
+                auto next = line.clustersWithSpaces().end;
+                REPORTER_ASSERT(reporter, lines[i + 1].clustersWithSpaces().start == next);
+                SkScalar nextWidth = impl->cluster(next).width();
+                REPORTER_ASSERT(reporter, line.width() + nextWidth > width - 0.25f);
+            }
+        }
+        REPORTER_ASSERT(reporter, start == size);
+    };
+
+    // Minified JSON has a few break opportunities, so only the lines are checked
+    std::string json;
+    for (int i = 0; i < 50; ++i) {
+        json += "{\"id\":" + std::to_string(i) +
+                ",\"name\":\"abc\",\"tags\":[\"x\",\"y\"],"
+                "\"ok\":true},";
+    }
+    for (SkScalar width : {50.f, 300.f, 301.f}) {
+        auto paragraph = layout(json, width);
+        checkLines(reporter, paragraph.get(), json.size(), width, false);
+    }
+    const std::pair<const char*, std::string> kinds[] = {
+            {"latin", repeat("abcdef", 500)},
+            {"cjk full stops", repeat("\xE3\x80\x82", 3000)},
+            {"exclamation marks", repeat("!", 3000)},
+            {"digits", repeat("666", 1000)},
+    };
+    for (auto& [name, text] : kinds) {
+        SkScalar minWidth = -1;
+        for (SkScalar width : {50.f, 300.f, 301.f}) {
+            auto paragraph = layout(text, width);
+            auto impl = static_cast<ParagraphImpl*>(paragraph.get());
+            // No break opportunity in the text, so the line breaks do not depend on the words
+            auto clusters = impl->clusters();
+            bool unbreakable = true;
+            // (The last cluster is the end of the text)
+            for (size_t i = 0; i + 2 < clusters.size(); ++i) {
+                unbreakable &= !clusters[i].isSoftBreak() && !clusters[i].isHardBreak();
+            }
+            REPORTER_ASSERT(reporter, unbreakable, "%s", name);
+            checkLines(reporter, paragraph.get(), text.size(), width, true);
+            REPORTER_ASSERT(reporter, impl->lines().size() > 1, "%s", name);
+            // The word is as wide as the text
+            if (minWidth < 0) {
+                minWidth = paragraph->getMinIntrinsicWidth();
+            }
+            REPORTER_ASSERT(reporter, paragraph->getMinIntrinsicWidth() == minWidth, "%s", name);
+            REPORTER_ASSERT(reporter,
+                            SkScalarNearlyEqual(
+                                    minWidth, paragraph->getMaxIntrinsicWidth(), minWidth / 1000),
+                            "%s",
+                            name);
+        }
+    }
+
+    // A soft hyphen ends each word in the text, and every word is too long for the line
+    std::string softHyphens = repeat(std::string(900, 'a') + "\xC2\xAD", 3) + std::string(20, 'b');
+    SkScalar minWidth = -1;
+    for (SkScalar width : {50.f, 300.f, 301.f}) {
+        auto paragraph = layout(softHyphens, width);
+        checkLines(reporter, paragraph.get(), softHyphens.size(), width, false);
+        if (minWidth < 0) {
+            minWidth = paragraph->getMinIntrinsicWidth();
+        }
+        REPORTER_ASSERT(reporter, paragraph->getMinIntrinsicWidth() == minWidth);
+    }
+    auto word = layout(std::string(900, 'a'), SK_ScalarInfinity);
+    REPORTER_ASSERT(reporter, minWidth >= word->getMaxIntrinsicWidth());
+
+    // A long word after a long word is not measured as the first one
+    std::string twoWords = std::string(600, 'a') + " " + std::string(2000, 'b');
+    for (SkScalar width : {50.f, 300.f}) {
+        auto two = layout(twoWords, width);
+        checkLines(reporter, two.get(), twoWords.size(), width, false);
+        SkScalar longer = layout(std::string(2000, 'b'), width)->getMinIntrinsicWidth();
+        REPORTER_ASSERT(reporter,
+                        SkScalarNearlyEqual(two->getMinIntrinsicWidth(), longer, 0.5f),
+                        "%f %f",
+                        two->getMinIntrinsicWidth(),
+                        longer);
+    }
+
+    // The no-break space comes just where a line (the 55th) is full: that line ends after it,
+    // and the rest of the word goes to the next line
+    std::string nbsp = std::string(1485, 'a') + "\xC2\xA0" + std::string(20, 'b');
+    auto paragraph = layout(nbsp, 300);
+    auto impl = static_cast<ParagraphImpl*>(paragraph.get());
+    REPORTER_ASSERT(reporter, impl->lines().size() >= 2);
+    if (impl->lines().size() >= 2) {
+        auto& last = impl->lines().back();
+        REPORTER_ASSERT(reporter, last.text().start == 1487, "%zu", last.text().start);
+        REPORTER_ASSERT(reporter, last.text().end == nbsp.size());
+    }
+}
+
+// The time to break a word into lines grows with the length of the word, not with its square
+UNIX_ONLY_TEST(SkParagraph_VeryLongWordParagraph, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    TextStyle text_style;
+    text_style.setFontFamilies({SkString("Roboto")});
+    text_style.setFontSize(20);
+    text_style.setColor(SK_ColorBLACK);
+    ParagraphStyle paragraph_style;
+    paragraph_style.setTextStyle(text_style);
+    std::string text(50000, 'a');
+    ParagraphBuilderImpl builder(paragraph_style, fontCollection, get_unicode());
+    builder.pushStyle(text_style);
+    builder.addText(text.data(), text.size());
+    auto paragraph = builder.Build();
+    // Shape and build clusters outside the timer so ASAN TArray poisoning is not measured
+    paragraph->layout(SK_ScalarInfinity);
+    auto start = std::chrono::steady_clock::now();
+    paragraph->layout(60);
+    auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start);
+    // The layout takes about 30 ms, and about 3 s when every line walks to the end of the word
+    REPORTER_ASSERT(reporter, ms.count() < 1000, "%f ms", ms.count());
+    REPORTER_ASSERT(reporter, static_cast<ParagraphImpl*>(paragraph.get())->lines().size() > 1000);
+}
+
+// getRectsForRange over the whole text must stay linear in the number of lines when the rounding
+// hack is on: an 8x longer text must not take ~64x longer. Serial, so other tests do not skew
+// the timing, and with the portable test fonts, so it runs on every bot
+DEF_SERIAL_TEST(SkParagraph_GetRectsForRangeLinearInLines, reporter) {
+    auto fontCollection = sk_make_sp<FontCollection>();
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
+    TextStyle text_style;
+    text_style.setFontSize(20);
+    text_style.setColor(SK_ColorBLACK);
+    ParagraphStyle paragraph_style;
+    paragraph_style.setTextStyle(text_style);
+    paragraph_style.setApplyRoundingHack(true);
+
+    auto timeRects = [&](int lineCount, size_t* boxCount) {
+        std::string text;
+        for (int i = 0; i < lineCount; ++i) {
+            text += "line\n";
+        }
+        ParagraphBuilderImpl builder(paragraph_style, fontCollection, get_unicode());
+        builder.pushStyle(text_style);
+        builder.addText(text.data(), text.size());
+        auto paragraph = builder.Build();
+        paragraph->layout(1000);
+        double best = std::numeric_limits<double>::max();
+        // The best of several runs filters out scheduler noise on shared bots
+        for (int run = 0; run < 3; ++run) {
+            auto start = std::chrono::steady_clock::now();
+            auto boxes = paragraph->getRectsForRange(0, text.size(), RectHeightStyle::kTight,
+                                                     RectWidthStyle::kTight);
+            std::chrono::duration<double, std::milli> ms =
+                    std::chrono::steady_clock::now() - start;
+            best = std::min(best, ms.count());
+            *boxCount = boxes.size();
+        }
+        return best;
+    };
+
+    size_t smallBoxes = 0;
+    size_t largeBoxes = 0;
+    double small = timeRects(1000, &smallBoxes);
+    double large = timeRects(8000, &largeBoxes);
+    REPORTER_ASSERT(reporter, smallBoxes >= 1000 && largeBoxes >= 8000,
+                    "%zu %zu", smallBoxes, largeBoxes);
+    // Linear work gives a ratio of ~8 and rounding all earlier boxes on every line gives ~50;
+    // the threshold leaves a 3x margin on both sides for noisy bots
+    REPORTER_ASSERT(reporter, large < 24 * small, "%f ms vs %f ms", large, small);
+}
+
 // Checked: DIFF?
 UNIX_ONLY_TEST(SkParagraph_KernScaleParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
@@ -5034,6 +5244,97 @@ UNIX_ONLY_TEST(SkParagraph_Ellipsize, reporter) {
         REPORTER_ASSERT(reporter, line.ellipsis() != nullptr);
         REPORTER_ASSERT(reporter, impl->runs().size() == 1);
     }
+}
+
+// A layout at another width reuses the shaped ellipsis of the run and style block, and gets
+// the same result as a new paragraph. A new shaping of the paragraph shapes it again.
+UNIX_ONLY_TEST(SkParagraph_EllipsisReusedAtOtherWidths, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->disableFontFallback();
+
+    ParagraphStyle paragraphStyle;
+    paragraphStyle.setMaxLines(1);
+    paragraphStyle.setEllipsis(u"…");
+    paragraphStyle.turnHintingOff();
+    TextStyle first;
+    first.setFontFamilies({SkString("Roboto")});
+    first.setFontSize(14);
+    const char* firstText = "Short text in a small font. ";
+    const char* secondText = "More text in a large font that does not fit on the line.";
+    SkScalar secondFontSize = 28;
+    auto build = [&]() {
+        ParagraphBuilderImpl builder(paragraphStyle, fontCollection, get_unicode());
+        builder.pushStyle(first);
+        builder.addText(firstText);
+        builder.pop();
+        TextStyle second = first;
+        second.setFontSize(secondFontSize);
+        builder.pushStyle(second);
+        builder.addText(secondText);
+        builder.pop();
+        return builder.Build();
+    };
+    auto ellipsisOf = [](Paragraph* paragraph) {
+        auto impl = static_cast<ParagraphImpl*>(paragraph);
+        return impl->lines().size() == 1 ? impl->lines()[0].ellipsis() : nullptr;
+    };
+    auto sameAsNewParagraph = [&](Paragraph* paragraph, SkScalar width) {
+        auto fresh = build();
+        fresh->layout(width);
+        const Run* a = ellipsisOf(paragraph);
+        const Run* b = ellipsisOf(fresh.get());
+        if (!a || !b) {
+            return false;
+        }
+        auto ga = a->glyphs();
+        auto gb = b->glyphs();
+        return a->advance() == b->advance() && a->font() == b->font() &&
+               std::equal(ga.begin(), ga.end(), gb.begin(), gb.end()) &&
+               paragraph->getLongestLine() == fresh->getLongestLine();
+    };
+
+    auto paragraph = build();
+    auto impl = static_cast<ParagraphImpl*>(paragraph.get());
+    // The line ends in the small text.
+    paragraph->layout(100);
+    REPORTER_ASSERT(reporter, impl->shapedEllipsisCount() == 1);
+    REPORTER_ASSERT(reporter, sameAsNewParagraph(paragraph.get(), 100));
+    const SkScalar smallAdvance = ellipsisOf(paragraph.get())->advance().fX;
+    paragraph->layout(110);
+    REPORTER_ASSERT(reporter, impl->shapedEllipsisCount() == 1);
+    REPORTER_ASSERT(reporter, sameAsNewParagraph(paragraph.get(), 110));
+
+    // The line ends in the large text, which has its own run and style block.
+    paragraph->layout(400);
+    REPORTER_ASSERT(reporter, impl->shapedEllipsisCount() == 2);
+    REPORTER_ASSERT(reporter, sameAsNewParagraph(paragraph.get(), 400));
+    REPORTER_ASSERT(reporter, ellipsisOf(paragraph.get())->advance().fX > smallAdvance);
+    paragraph->layout(100);
+    REPORTER_ASSERT(reporter, impl->shapedEllipsisCount() == 2);
+    REPORTER_ASSERT(reporter, sameAsNewParagraph(paragraph.get(), 100));
+
+    // A change of the font size shapes the paragraph again, and the old ellipses are gone.
+    paragraph->updateFontSize(0, impl->text().size(), 20);
+    paragraph->layout(100);
+    REPORTER_ASSERT(reporter, impl->shapedEllipsisCount() == 1);
+    REPORTER_ASSERT(reporter, ellipsisOf(paragraph.get())->advance().fX > smallAdvance);
+
+    // Blocks whose font sizes are nearly equal share one run, but each ellipsis uses the exact
+    // size of its block.
+    secondFontSize = 14 + 0.5f * SK_ScalarNearlyZero;
+    paragraph = build();
+    impl = static_cast<ParagraphImpl*>(paragraph.get());
+    paragraph->layout(100);
+    REPORTER_ASSERT(reporter, impl->runs().size() == 1);
+    REPORTER_ASSERT(reporter, impl->shapedEllipsisCount() == 1);
+    REPORTER_ASSERT(reporter, sameAsNewParagraph(paragraph.get(), 100));
+    paragraph->layout(300);
+    REPORTER_ASSERT(reporter, impl->shapedEllipsisCount() == 2);
+    REPORTER_ASSERT(reporter, sameAsNewParagraph(paragraph.get(), 300));
+    paragraph->layout(110);
+    REPORTER_ASSERT(reporter, impl->shapedEllipsisCount() == 2);
+    REPORTER_ASSERT(reporter, sameAsNewParagraph(paragraph.get(), 110));
 }
 
 // Checked: NO DIFF
@@ -6075,6 +6376,13 @@ UNIX_ONLY_TEST(SkParagraph_CachePreservesUnresolvedGlyphs, reporter) {
     auto cached = make(180);
     REPORTER_ASSERT(reporter, cached->unresolvedGlyphs() == cold->unresolvedGlyphs());
     REPORTER_ASSERT(reporter, cached->unresolvedCodepoints() == unresolved);
+    // Shaping again after a cache hit must not change the set the cache shares
+    fonts->getParagraphCache()->turnOn(false);
+    cached->markDirty();
+    cached->layout(150);
+    REPORTER_ASSERT(reporter, cached->unresolvedCodepoints() == unresolved);
+    REPORTER_ASSERT(reporter, cold->unresolvedCodepoints() == unresolved);
+    REPORTER_ASSERT(reporter, make(120)->unresolvedCodepoints() == unresolved);
 }
 
 UNIX_ONLY_TEST(SkParagraph_CacheText, reporter) {
@@ -10922,6 +11230,155 @@ UNIX_ONLY_TEST(SkParagraph_SoftHyphenBreakNotTakenNeedsNoRoom, reporter) {
     checkLines(reporter, paragraph.get(), "xy abcdi|jklm");
 }
 
+// A justified line that breaks at a soft hyphen spreads its text so that the text and the drawn
+// hyphen together fill the line, in either paragraph direction.
+UNIX_ONLY_TEST(SkParagraph_SoftHyphenJustifiedLineFitsHyphen, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+
+    SkScalar width = singleLineWidth(fontCollection, "xy abcd-") + 15;
+    for (TextDirection direction : {TextDirection::kLtr, TextDirection::kRtl}) {
+        auto paragraph = layoutWithSoftHyphens(
+                fontCollection, "xy abcd~efgh", width, [direction](ParagraphStyle& style) {
+                    style.setTextAlign(TextAlign::kJustify);
+                    style.setTextDirection(direction);
+                });
+        checkLines(reporter, paragraph.get(), "xy abcd-|efgh");
+        auto& line = static_cast<ParagraphImpl*>(paragraph.get())->lines()[0];
+        auto extent = lineRectExtent(paragraph.get(), line, 0, 12);
+        REPORTER_ASSERT(
+                reporter, SkScalarNearlyEqual(extent.first, 0, EPSILON100), "%g", extent.first);
+        REPORTER_ASSERT(reporter,
+                        SkScalarNearlyEqual(extent.second, width, EPSILON100),
+                        "%g vs %g",
+                        extent.second,
+                        width);
+    }
+}
+
+// A justified RTL line with no spaces to spread is right aligned, and its hyphen stays in the line.
+UNIX_ONLY_TEST(SkParagraph_SoftHyphenJustifiedRtlLineWithoutSpacesFitsHyphen, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+
+    SkScalar width = singleLineWidth(fontCollection, "abcd-") + 15;
+    auto paragraph =
+            layoutWithSoftHyphens(fontCollection, "abcd~efgh", width, [](ParagraphStyle& style) {
+                style.setTextAlign(TextAlign::kJustify);
+                style.setTextDirection(TextDirection::kRtl);
+            });
+    checkLines(reporter, paragraph.get(), "abcd-|efgh");
+    auto& line = static_cast<ParagraphImpl*>(paragraph.get())->lines()[0];
+    auto extent = lineRectExtent(paragraph.get(), line, 0, 9);
+    REPORTER_ASSERT(reporter,
+                    SkScalarNearlyEqual(extent.first, width - line.width(), EPSILON100),
+                    "%g vs %g",
+                    extent.first,
+                    width - line.width());
+    REPORTER_ASSERT(reporter,
+                    SkScalarNearlyEqual(extent.second, width, EPSILON100),
+                    "%g vs %g",
+                    extent.second,
+                    width);
+}
+
+// An ideographic line breaking at a soft hyphen counts justification patches only between
+// visible characters, not between an ideograph and an adjacent soft hyphen
+UNIX_ONLY_TEST(SkParagraph_SoftHyphenJustifiedIdeographicFitsHyphen, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+
+    auto layoutCJK = [&](const char* text, SkScalar width, TextDirection direction) {
+        ParagraphStyle paragraph_style;
+        paragraph_style.turnHintingOff();
+        paragraph_style.setApplyRoundingHack(false);
+        paragraph_style.setRenderSoftHyphens(true);
+        paragraph_style.setTextAlign(TextAlign::kJustify);
+        paragraph_style.setTextDirection(direction);
+        ParagraphBuilderImpl builder(paragraph_style, fontCollection, get_unicode());
+        TextStyle text_style;
+        text_style.setFontFamilies({SkString("Source Han Serif CN"), SkString("Roboto")});
+        text_style.setFontSize(20);
+        text_style.setColor(SK_ColorBLACK);
+        builder.pushStyle(text_style);
+        std::string utf8 = withSoftHyphens(text);
+        builder.addText(utf8.c_str(), utf8.size());
+        builder.pop();
+        auto paragraph = builder.Build();
+        paragraph->layout(width);
+        return paragraph;
+    };
+
+    // "漢字~語文" breaks after "漢字~": only 1 justification patch exists (between 漢 and 字), so
+    // the second ideograph 字 must reach the start of the rendered hyphen at (cjkWidth - hyphen)
+    SkScalar hyphenWidth = layoutCJK("-", 10000, TextDirection::kLtr)->getMaxIntrinsicWidth();
+    SkScalar cjkWidth = layoutCJK("漢字-", 10000, TextDirection::kLtr)->getMaxIntrinsicWidth() + 6;
+    auto paragraph = layoutCJK("漢字~語文", cjkWidth, TextDirection::kLtr);
+    auto* impl = static_cast<ParagraphImpl*>(paragraph.get());
+    REPORTER_ASSERT(reporter, impl->lines().size() == 2);
+    REPORTER_ASSERT(reporter, impl->lines()[0].hyphen() != nullptr);
+    auto secondChar = lineRectExtent(paragraph.get(), impl->lines()[0], 1, 2);
+    REPORTER_ASSERT(reporter,
+                    SkScalarNearlyEqual(secondChar.second, cjkWidth - hyphenWidth, EPSILON100),
+                    "%g vs %g",
+                    secondChar.second,
+                    cjkWidth - hyphenWidth);
+    auto extent = lineRectExtent(paragraph.get(), impl->lines()[0], 0, 3);
+    REPORTER_ASSERT(
+            reporter, SkScalarNearlyEqual(extent.first, 0, EPSILON100), "%g", extent.first);
+    REPORTER_ASSERT(reporter,
+                    SkScalarNearlyEqual(extent.second, cjkWidth, EPSILON100),
+                    "%g vs %g",
+                    extent.second,
+                    cjkWidth);
+
+    // A single ideograph before a soft hyphen break ("漢~字") has 0 inter-character patches to
+    // stretch, so its width must remain its unstretched advance plus the hyphen
+    SkScalar oneCharPlusHyphen =
+            layoutCJK("漢-", 10000, TextDirection::kLtr)->getMaxIntrinsicWidth();
+    SkScalar oneWidth = oneCharPlusHyphen + 6;
+    auto single = layoutCJK("漢~字", oneWidth, TextDirection::kLtr);
+    auto* singleImpl = static_cast<ParagraphImpl*>(single.get());
+    REPORTER_ASSERT(reporter, singleImpl->lines().size() == 2);
+    REPORTER_ASSERT(reporter, singleImpl->lines()[0].hyphen() != nullptr);
+    REPORTER_ASSERT(reporter,
+                    SkScalarNearlyEqual(
+                            singleImpl->lines()[0].width(), oneCharPlusHyphen, EPSILON100),
+                    "%g vs %g",
+                    singleImpl->lines()[0].width(),
+                    oneCharPlusHyphen);
+
+    // An unbroken soft hyphen between two ideographs ("漢~字語~文言") must not insert a second
+    // justification patch between 漢 and 字: each character's justified box must match the same
+    // line without the unbroken soft hyphen ("漢字語~文言")
+    SkScalar threeWidth =
+            layoutCJK("漢字語-", 10000, TextDirection::kLtr)->getMaxIntrinsicWidth() + 6;
+    auto unbroken = layoutCJK("漢~字語~文言", threeWidth, TextDirection::kLtr);
+    auto* unbrokenImpl = static_cast<ParagraphImpl*>(unbroken.get());
+    auto reference = layoutCJK("漢字語~文言", threeWidth, TextDirection::kLtr);
+    auto* referenceImpl = static_cast<ParagraphImpl*>(reference.get());
+    REPORTER_ASSERT(reporter, unbrokenImpl->lines().size() == 2);
+    REPORTER_ASSERT(reporter, unbrokenImpl->lines()[0].hyphen() != nullptr);
+    auto char1 = lineRectExtent(unbroken.get(), unbrokenImpl->lines()[0], 2, 3);
+    auto refChar1 = lineRectExtent(reference.get(), referenceImpl->lines()[0], 1, 2);
+    auto char2 = lineRectExtent(unbroken.get(), unbrokenImpl->lines()[0], 3, 4);
+    REPORTER_ASSERT(reporter,
+                    SkScalarNearlyEqual(char1.first, refChar1.first, EPSILON100),
+                    "%g vs %g",
+                    char1.first,
+                    refChar1.first);
+    REPORTER_ASSERT(reporter,
+                    SkScalarNearlyEqual(char1.second, refChar1.second, EPSILON100),
+                    "%g vs %g",
+                    char1.second,
+                    refChar1.second);
+    REPORTER_ASSERT(reporter,
+                    SkScalarNearlyEqual(char2.second, threeWidth - hyphenWidth, EPSILON100),
+                    "%g vs %g",
+                    char2.second,
+                    threeWidth - hyphenWidth);
+}
+
 // Laid out at its min intrinsic width, text with soft hyphens doesn't overflow: as in CSS
 // min-content, the min intrinsic width includes the hyphen drawn at a soft hyphen break.
 UNIX_ONLY_TEST(SkParagraph_SoftHyphenMinIntrinsicWidthIncludesHyphen, reporter) {
@@ -11155,6 +11612,64 @@ UNIX_ONLY_TEST(SkParagraph_SoftHyphenFallbackFontWidth, reporter) {
                     minWidth);
 }
 
+// A hit on the rendered hyphen is at the end of its line, upstream, as at the end of any other
+// line. Downstream would put it at the start of the next line, and getClosestUTF16GlyphInfoAt
+// would return the next line's first glyph instead of the soft hyphen.
+UNIX_ONLY_TEST(SkParagraph_SoftHyphenHitIsUpstream, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+
+    const size_t softHyphen = 5;
+    auto paragraph = layoutWithSoftHyphens(fontCollection, "inter~national", 80);
+    checkLines(reporter, paragraph.get(), "inter-|national");
+    auto& line = static_cast<ParagraphImpl*>(paragraph.get())->lines()[0];
+    SkScalar x = line.offset().fX + (line.widthWithoutEllipsis() + line.width()) / 2;
+    SkScalar y = line.offset().fY + line.height() / 2;
+
+    auto position = paragraph->getGlyphPositionAtCoordinate(x, y);
+    REPORTER_ASSERT(reporter, position.position == softHyphen + 1, "%d", position.position);
+    REPORTER_ASSERT(reporter, position.affinity == Affinity::kUpstream);
+
+    Paragraph::GlyphInfo glyphInfo;
+    REPORTER_ASSERT(reporter, paragraph->getClosestUTF16GlyphInfoAt(x, y, &glyphInfo));
+    REPORTER_ASSERT(reporter,
+                    glyphInfo.fGraphemeClusterTextRange == TextRange(softHyphen, softHyphen + 1),
+                    "[%zu, %zu)",
+                    glyphInfo.fGraphemeClusterTextRange.start,
+                    glyphInfo.fGraphemeClusterTextRange.end);
+}
+
+// Likewise for a hit on the ellipsis, which is at the end of the truncated text. Downstream there
+// is past the line's text, so getClosestUTF16GlyphInfoAt found no glyph at all.
+UNIX_ONLY_TEST(SkParagraph_EllipsisHitIsUpstream, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+
+    SkScalar width = singleLineWidth(fontCollection, "abc...") + 1;
+    auto paragraph =
+            layoutWithSoftHyphens(fontCollection, "abcdef", width, [](ParagraphStyle& style) {
+                style.setMaxLines(1);
+                style.setEllipsis(SkString("..."));
+            });
+    auto& line = static_cast<ParagraphImpl*>(paragraph.get())->lines()[0];
+    REPORTER_ASSERT(reporter, line.ellipsis() != nullptr);
+    REPORTER_ASSERT(reporter, line.trimmedText() == TextRange(0, 3));
+    SkScalar x = line.offset().fX + (line.widthWithoutEllipsis() + line.width()) / 2;
+    SkScalar y = line.offset().fY + line.height() / 2;
+
+    auto position = paragraph->getGlyphPositionAtCoordinate(x, y);
+    REPORTER_ASSERT(reporter, position.position == 3, "%d", position.position);
+    REPORTER_ASSERT(reporter, position.affinity == Affinity::kUpstream);
+
+    Paragraph::GlyphInfo glyphInfo;
+    REPORTER_ASSERT(reporter, paragraph->getClosestUTF16GlyphInfoAt(x, y, &glyphInfo));
+    REPORTER_ASSERT(reporter,
+                    glyphInfo.fGraphemeClusterTextRange == TextRange(2, 3),
+                    "[%zu, %zu)",
+                    glyphInfo.fGraphemeClusterTextRange.start,
+                    glyphInfo.fGraphemeClusterTextRange.end);
+}
+
 // Only a soft hyphen's own width changes how a too-long word is measured. Other soft breaks, such
 // as the end of the text, still end the word before their cluster, so a word too long for the
 // line at the end of the text moves to the next line before it's split, as it always has
@@ -11382,6 +11897,127 @@ DEF_TEST(SkParagraph_JustificationHitTest, reporter) {
     }
 }
 
+// Lays out the text in one style, or in two styles if the second text is given
+static std::unique_ptr<Paragraph> layoutJustified(sk_sp<ResourceFontCollection> fontCollection,
+                                                  const char* family,
+                                                  SkScalar fontSize,
+                                                  TextDirection direction,
+                                                  SkScalar width,
+                                                  const char* text,
+                                                  const char* secondText = nullptr) {
+    ParagraphStyle paragraph_style;
+    paragraph_style.turnHintingOff();
+    paragraph_style.setApplyRoundingHack(false);
+    paragraph_style.setTextAlign(TextAlign::kJustify);
+    paragraph_style.setTextDirection(direction);
+    ParagraphBuilderImpl builder(paragraph_style, fontCollection, get_unicode());
+    TextStyle text_style;
+    text_style.setFontFamilies({SkString(family), SkString("Roboto")});
+    text_style.setFontSize(fontSize);
+    text_style.setColor(SK_ColorBLACK);
+    builder.pushStyle(text_style);
+    builder.addText(text);
+    if (secondText != nullptr) {
+        text_style.setFontSize(fontSize * 1.5f);
+        builder.pushStyle(text_style);
+        builder.addText(secondText);
+        builder.pop();
+    }
+    builder.pop();
+    auto paragraph = builder.Build();
+    paragraph->layout(width);
+    return paragraph;
+}
+
+// A hit inside the box of a code unit lands on that code unit: near the start of the box (in the
+// direction of its text) it returns the code unit downstream, near the end the next one upstream
+static void checkHitsInsideBoxes(skiatest::Reporter* reporter, Paragraph* paragraph) {
+    auto impl = static_cast<ParagraphImpl*>(paragraph);
+    impl->ensureUTF16Mapping();
+    auto length = SkToS32(impl->getUTF16Index(impl->text().size()));
+    for (int32_t i = 0; i < length; ++i) {
+        auto boxes = paragraph->getRectsForRange(
+                i, i + 1, RectHeightStyle::kTight, RectWidthStyle::kTight);
+        for (auto& box : boxes) {
+            if (box.rect.width() < 1) {
+                continue;
+            }
+            SkScalar y = box.rect.centerY();
+            SkScalar quarter = box.rect.width() / 4;
+            auto left = paragraph->getGlyphPositionAtCoordinate(box.rect.fLeft + quarter, y);
+            auto right = paragraph->getGlyphPositionAtCoordinate(box.rect.fRight - quarter, y);
+            bool ltr = box.direction == TextDirection::kLtr;
+            auto start = ltr ? left : right;
+            auto end = ltr ? right : left;
+            REPORTER_ASSERT(reporter,
+                            start.position == i && start.affinity == Affinity::kDownstream,
+                            "box of %d [%g, %g): start hit %d %s",
+                            i,
+                            box.rect.fLeft,
+                            box.rect.fRight,
+                            start.position,
+                            start.affinity == Affinity::kUpstream ? "upstream" : "downstream");
+            REPORTER_ASSERT(reporter,
+                            end.position == i + 1 && end.affinity == Affinity::kUpstream,
+                            "box of %d [%g, %g): end hit %d %s",
+                            i,
+                            box.rect.fLeft,
+                            box.rect.fRight,
+                            end.position,
+                            end.affinity == Affinity::kUpstream ? "upstream" : "downstream");
+        }
+    }
+}
+
+// The text from https://github.com/flutter/flutter/issues/155062, where the box of the last
+// ideograph on a line ends at the line width
+UNIX_ONLY_TEST(SkParagraph_JustifiedIdeographicHitsInsideBoxes, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    auto paragraph = layoutJustified(
+            fontCollection,
+            "Source Han Serif CN",
+            15,
+            TextDirection::kLtr,
+            300,
+            "等一下我先下去，你跟在我后面，二伢子你带个土耗子殿后，三伢子你就别下去了，"
+            "四个人都下去，想退都来不及退，你就拉着土耗子的尾巴，我们在里面一吆喝你就把东西拉出来。”");
+    REPORTER_ASSERT(reporter, paragraph->lineNumber() > 1);
+    checkHitsInsideBoxes(reporter, paragraph.get());
+}
+
+// The trailing space of each justified line, and a space where the style changes
+UNIX_ONLY_TEST(SkParagraph_JustifiedSpacesHitsInsideBoxes, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    auto paragraph = layoutJustified(fontCollection,
+                                     "Roboto",
+                                     15,
+                                     TextDirection::kLtr,
+                                     300,
+                                     "The quick brown fox jumps over the lazy dog and ",
+                                     "keeps running across the wide green field until night");
+    REPORTER_ASSERT(reporter, paragraph->lineNumber() > 1);
+    checkHitsInsideBoxes(reporter, paragraph.get());
+}
+
+// Mixed RTL and LTR runs in justified RTL lines
+UNIX_ONLY_TEST(SkParagraph_JustifiedRtlMixedHitsInsideBoxes, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    for (SkScalar width : {110.0f, 140.0f, 180.0f, 300.0f}) {
+        auto paragraph =
+                layoutJustified(fontCollection,
+                                "Noto Naskh Arabic",
+                                15,
+                                TextDirection::kRtl,
+                                width,
+                                "Hello world دار ورد زاد and more english words دور رواد here ok");
+        REPORTER_ASSERT(reporter, paragraph->lineNumber() > 1);
+        checkHitsInsideBoxes(reporter, paragraph.get());
+    }
+}
+
 // Ensure BiDi control characters and dropped glyphs do not leave gaps in code unit cluster mapping
 DEF_TEST(SkParagraph_BidiControlGaps, reporter) {
     auto fontCollection = sk_make_sp<FontCollection>();
@@ -11591,6 +12227,55 @@ DEF_TEST(SkParagraph_BidiIsolateStyledBlockNoSpaceFont, reporter) {
 }
 
 namespace {
+// A font manager that only implements matchFamilyStyle (not matchFamily) to
+// verify that FontCollection resolves families through the style API.
+class StyleOnlyFontMgr : public TypefaceFontProvider {
+public:
+    explicit StyleOnlyFontMgr(sk_sp<SkTypeface> typeface) : fTypeface(std::move(typeface)) {}
+
+    int matchFamilyCalls() const { return fMatchFamilyCalls; }
+    int matchFamilyStyleCalls() const { return fMatchFamilyStyleCalls; }
+
+private:
+    sk_sp<SkFontStyleSet> onMatchFamily(const char[]) const override {
+        ++fMatchFamilyCalls;
+        return nullptr;
+    }
+
+    sk_sp<SkTypeface> onMatchFamilyStyle(const char familyName[],
+                                         const SkFontStyle&) const override {
+        ++fMatchFamilyStyleCalls;
+        return familyName && strcmp(familyName, "StyleOnly") == 0 ? fTypeface : nullptr;
+    }
+
+    sk_sp<SkTypeface> fTypeface;
+    mutable int fMatchFamilyCalls = 0;
+    mutable int fMatchFamilyStyleCalls = 0;
+};
+}  // namespace
+
+DEF_TEST(SkParagraph_FindTypefacesUsesMatchFamilyStyle, reporter) {
+    auto typeface =
+            ToolUtils::TestFontMgr()->makeFromStream(GetResourceAsStream("fonts/abc/abc.ttf"), {});
+    if (!typeface) {
+        return;
+    }
+
+    sk_sp<SkTypeface> expected = typeface;
+    auto manager = sk_make_sp<StyleOnlyFontMgr>(std::move(typeface));
+    auto collection = sk_make_sp<FontCollection>();
+    collection->setDefaultFontManager(manager);
+
+    auto faces = collection->findTypefaces({SkString("StyleOnly")}, SkFontStyle());
+    REPORTER_ASSERT(reporter, faces.size() == 1);
+    if (faces.size() == 1) {
+        REPORTER_ASSERT(reporter, faces[0] == expected);
+    }
+    REPORTER_ASSERT(reporter, manager->matchFamilyStyleCalls() == 1);
+    REPORTER_ASSERT(reporter, manager->matchFamilyCalls() == 0);
+}
+
+namespace {
 // Counts fallback requests and finds no fallback typeface
 class CountingFallbackFontMgr : public TypefaceFontProvider {
 public:
@@ -11682,6 +12367,8 @@ public:
     explicit CountingFontMgr(sk_sp<SkFontMgr> fontMgr) : fFontMgr(std::move(fontMgr)) {}
     mutable int fCharacterMatches = 0;
     mutable int fFamilyStyleMatches = 0;
+    // Counted apart from fFamilyStyleMatches because matchTypeface also calls matchFamilyStyle
+    mutable int fEmojiFamilyMatches = 0;
 
 protected:
     int onCountFamilies() const override { return fFontMgr->countFamilies(); }
@@ -11697,6 +12384,9 @@ protected:
     sk_sp<SkTypeface> onMatchFamilyStyle(const char familyName[],
                                          const SkFontStyle& style) const override {
         ++fFamilyStyleMatches;
+        if (familyName && std::strcmp(familyName, "Apple Color Emoji") == 0) {
+            ++fEmojiFamilyMatches;
+        }
         return fFontMgr->matchFamilyStyle(familyName, style);
     }
     sk_sp<SkTypeface> onMatchFamilyStyleCharacter(const char familyName[],
@@ -11768,7 +12458,7 @@ DEF_TEST(SkParagraph_FallbackCacheAcrossParagraphs, reporter) {
 
     // Distinct emoji codepoints must not re-query family-based Apple Color Emoji fallback
     layoutWith(fontCollection, "e 一 ❯ \U0001F602");
-    REPORTER_ASSERT(reporter, otherFontMgr->fFamilyStyleMatches <= 1);
+    REPORTER_ASSERT(reporter, otherFontMgr->fEmojiFamilyMatches <= 1);
 
     // Emoji fallback must work when only a non-default font manager is configured
     auto testFontMgr = sk_make_sp<CountingFontMgr>(ToolUtils::TestFontMgr());
@@ -11912,4 +12602,871 @@ DEF_TEST(SkParagraph_FontCollectionSameSettingsKeepCaches, reporter) {
     fontCollection->setAssetFontManager(nullptr);
     fontCollection->enableFontFallback();
     REPORTER_ASSERT(reporter, fontCollection->getParagraphCache()->count() == 1);
+}
+
+// Each style block resolves its text with several fonts. The runs of each block in a
+// many-block paragraph must be the same as the runs of that block shaped alone.
+DEF_TEST(SkParagraph_ManyStyleBlocksWithSeveralFonts, reporter) {
+    sk_sp<SkFontMgr> mgr = ToolUtils::TestFontMgr();
+    auto abcTypeface = mgr->makeFromStream(GetResourceAsStream("fonts/abc/abc.ttf"), {});
+    auto robotoTypeface = mgr->makeFromStream(GetResourceAsStream("fonts/Roboto-Regular.ttf"), {});
+    if (!abcTypeface || !robotoTypeface) {
+        return;
+    }
+
+    auto fontCollection = sk_make_sp<FontCollection>();
+    auto fontProvider = sk_make_sp<TypefaceFontProvider>();
+    fontProvider->registerTypeface(abcTypeface, SkString("Abc"));
+    fontProvider->registerTypeface(robotoTypeface, SkString("Roboto"));
+    fontCollection->setAssetFontManager(fontProvider);
+    fontCollection->getParagraphCache()->turnOn(false);
+
+    // "ab" and "c" resolve with Abc, "xy " with Roboto, U+E123 with no font
+    const std::string blockText = "abxy c\xEE\x84\xA3";
+    auto styleOf = [](size_t i) {
+        TextStyle style;
+        style.setFontFamilies({SkString("Abc"), SkString("Roboto")});
+        // A different font size makes each block a separate shaping block
+        style.setFontSize(i % 2 ? 21.0f : 20.0f);
+        return style;
+    };
+    struct Piece {
+        TextRange text;
+        std::vector<SkGlyphID> glyphs;
+        SkTypefaceID typeface;
+    };
+    auto piecesOf = [](ParagraphImpl* impl) {
+        std::vector<Piece> pieces;
+        for (auto& run : impl->runs()) {
+            pieces.push_back({run.textRange(),
+                              std::vector<SkGlyphID>(run.glyphs().begin(), run.glyphs().end()),
+                              run.font().getTypeface()->uniqueID()});
+        }
+        return pieces;
+    };
+
+    const size_t kBlocks = 64;
+    ParagraphStyle paragraphStyle;
+    ParagraphBuilderImpl builder(paragraphStyle, fontCollection, get_unicode());
+    for (size_t i = 0; i < kBlocks; ++i) {
+        builder.pushStyle(styleOf(i));
+        builder.addText(blockText.data(), blockText.size());
+        builder.pop();
+    }
+    auto paragraph = builder.Build();
+    paragraph->layout(10000.0f);
+    auto* impl = static_cast<ParagraphImpl*>(paragraph.get());
+    REPORTER_ASSERT(reporter, paragraph->unresolvedGlyphs() == (int32_t)kBlocks);
+
+    std::vector<Piece> expected[2];
+    for (size_t i = 0; i < 2; ++i) {
+        ParagraphBuilderImpl single(paragraphStyle, fontCollection, get_unicode());
+        single.pushStyle(styleOf(i));
+        single.addText(blockText.data(), blockText.size());
+        single.pop();
+        auto singleParagraph = single.Build();
+        singleParagraph->layout(10000.0f);
+        expected[i] = piecesOf(static_cast<ParagraphImpl*>(singleParagraph.get()));
+        // Abc, Roboto, Abc and the unresolved piece
+        REPORTER_ASSERT(reporter, expected[i].size() >= 3);
+    }
+
+    std::vector<Piece> actual = piecesOf(impl);
+    REPORTER_ASSERT(reporter, actual.size() == kBlocks * expected[0].size());
+    if (actual.size() != kBlocks * expected[0].size()) {
+        return;
+    }
+    size_t index = 0;
+    for (size_t i = 0; i < kBlocks; ++i) {
+        size_t blockStart = i * blockText.size();
+        for (const Piece& piece : expected[i % 2]) {
+            const Piece& run = actual[index++];
+            REPORTER_ASSERT(reporter, run.text.start == piece.text.start + blockStart);
+            REPORTER_ASSERT(reporter, run.text.end == piece.text.end + blockStart);
+            REPORTER_ASSERT(reporter, run.glyphs == piece.glyphs);
+            REPORTER_ASSERT(reporter, run.typeface == piece.typeface);
+        }
+    }
+}
+
+// Trailing spaces in two runs at a line end must not make an invalid cluster range in justify
+DEF_TEST(SkParagraph_JustifyTrailingSpacesInTwoRuns, reporter) {
+    auto fontCollection = sk_make_sp<FontCollection>();
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
+    ParagraphStyle paragraphStyle;
+    paragraphStyle.setTextAlign(TextAlign::kJustify);
+    ParagraphBuilderImpl builder(paragraphStyle, fontCollection, get_unicode());
+    TextStyle textStyle;
+    textStyle.setFontSize(20);
+    builder.pushStyle(textStyle);
+    builder.addText("aaa bbb ");
+    // A different font size puts the second space in its own run
+    textStyle.setFontSize(10);
+    builder.pushStyle(textStyle);
+    builder.addText(" ");
+    builder.pop();
+    builder.addText("ccc");
+    auto paragraph = builder.Build();
+    paragraph->layout(SK_ScalarInfinity);
+    auto boxes = paragraph->getRectsForRange(0, 7, RectHeightStyle::kTight, RectWidthStyle::kTight);
+    REPORTER_ASSERT(reporter, boxes.size() == 1);
+    if (boxes.empty()) {
+        return;
+    }
+    SkScalar width = SkScalarCeilToScalar(boxes.back().rect.fRight) + 1;
+
+    // The first line is "aaa bbb" and the two spaces are its trailing whitespaces
+    paragraph->layout(width);
+    auto impl = static_cast<ParagraphImpl*>(paragraph.get());
+    REPORTER_ASSERT(reporter, impl->lines().size() == 2);
+    if (impl->lines().size() != 2) {
+        return;
+    }
+    auto& line = impl->lines()[0];
+    REPORTER_ASSERT(reporter, line.clusters().end + 2 == line.clustersWithSpaces().end);
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(line.width(), width));
+}
+
+// Justify must skip runs that the ellipsis removed from a line
+DEF_TEST(SkParagraph_JustifyEllipsisRemovesRuns, reporter) {
+    auto fontCollection = sk_make_sp<FontCollection>();
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
+    auto build = [&](bool ellipsis) {
+        ParagraphStyle paragraphStyle;
+        paragraphStyle.setTextAlign(TextAlign::kJustify);
+        if (ellipsis) {
+            paragraphStyle.setMaxLines(1);
+            paragraphStyle.setEllipsis(u"\u2026");
+        }
+        ParagraphBuilderImpl builder(paragraphStyle, fontCollection, get_unicode());
+        TextStyle textStyle;
+        // The ellipsis in this large font is wider than the line
+        textStyle.setFontSize(100);
+        builder.pushStyle(textStyle);
+        builder.addText("i");
+        textStyle.setFontSize(10);
+        builder.pushStyle(textStyle);
+        builder.addText("j kkkk");
+        return builder.Build();
+    };
+    auto paragraph = build(false);
+    paragraph->layout(SK_ScalarInfinity);
+    auto boxes = paragraph->getRectsForRange(0, 2, RectHeightStyle::kTight, RectWidthStyle::kTight);
+    REPORTER_ASSERT(reporter, !boxes.empty());
+    if (boxes.empty()) {
+        return;
+    }
+
+    // "ij" fits on the line, but no ellipsis fits after any part of it
+    paragraph = build(true);
+    paragraph->layout(SkScalarCeilToScalar(boxes.back().rect.fRight) + 1);
+    auto impl = static_cast<ParagraphImpl*>(paragraph.get());
+    REPORTER_ASSERT(reporter, impl->lines().size() == 1);
+    REPORTER_ASSERT(reporter, paragraph->didExceedMaxLines());
+}
+
+// Justification fills the lines to the full width, also when the paragraph is laid out again
+DEF_TEST(SkParagraph_JustifyFillsLines, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->disableFontFallback();
+
+    TextStyle style;
+    style.setFontFamilies({SkString("Roboto")});
+    style.setFontSize(20);
+    style.setColor(SK_ColorBLACK);
+    ParagraphStyle paragraphStyle;
+    paragraphStyle.setTextStyle(style);
+    paragraphStyle.setTextAlign(TextAlign::kJustify);
+    ParagraphBuilderImpl builder(paragraphStyle, fontCollection, get_unicode());
+    builder.pushStyle(style);
+    builder.addText("The quick brown fox jumps over the lazy dog and runs far away");
+    auto paragraph = builder.Build();
+    auto impl = static_cast<ParagraphImpl*>(paragraph.get());
+
+    for (SkScalar width : {200.0f, 260.0f}) {
+        paragraph->layout(width);
+        REPORTER_ASSERT(reporter, impl->lines().size() > 1);
+        // The last line is not justified
+        for (size_t i = 0; i + 1 < impl->lines().size(); ++i) {
+            auto range = impl->lines()[i].trimmedText();
+            auto boxes = paragraph->getRectsForRange(
+                    range.start, range.end, RectHeightStyle::kTight, RectWidthStyle::kTight);
+            REPORTER_ASSERT(reporter, !boxes.empty());
+            REPORTER_ASSERT(reporter,
+                            SkScalarNearlyEqual(boxes.back().rect.fRight, width, 0.01f),
+                            "line %zu: %f != %f",
+                            i,
+                            boxes.back().rect.fRight,
+                            width);
+        }
+    }
+}
+
+// Paragraphs that get their shaped runs from ParagraphCache share the glyph data of the runs.
+// Justification of one of them must not change the others.
+DEF_TEST(SkParagraph_CacheSharedGlyphData, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->disableFontFallback();
+    // The reference does not use the cache
+    sk_sp<ResourceFontCollection> referenceFonts = sk_make_sp<ResourceFontCollection>();
+    referenceFonts->disableFontFallback();
+    referenceFonts->getParagraphCache()->turnOn(false);
+
+    int found = 0;
+    fontCollection->getParagraphCache()->setChecker(
+            [&found](ParagraphImpl*, const char* event, bool) {
+                found += strcmp(event, "foundParagraph") == 0;
+            });
+
+    auto build = [&](sk_sp<FontCollection> fonts, TextAlign align) {
+        TextStyle style;
+        style.setFontFamilies({SkString("Roboto")});
+        style.setFontSize(20);
+        style.setColor(SK_ColorBLACK);
+        ParagraphStyle paragraphStyle;
+        paragraphStyle.setTextStyle(style);
+        paragraphStyle.setTextAlign(align);
+        ParagraphBuilderImpl builder(paragraphStyle, fonts, get_unicode());
+        builder.pushStyle(style);
+        builder.addText("The quick brown fox jumps over the lazy dog and runs far away");
+        auto paragraph = builder.Build();
+        paragraph->layout(200);
+        return paragraph;
+    };
+    auto boxes = [](Paragraph* paragraph) {
+        std::vector<SkRect> rects;
+        for (auto& box :
+             paragraph->getRectsForRange(0, 62, RectHeightStyle::kTight, RectWidthStyle::kTight)) {
+            rects.push_back(box.rect);
+        }
+        return rects;
+    };
+
+    auto referenceLeft = boxes(build(referenceFonts, TextAlign::kLeft).get());
+    auto referenceJustified = boxes(build(referenceFonts, TextAlign::kJustify).get());
+    REPORTER_ASSERT(reporter, referenceLeft != referenceJustified);
+
+    auto justified = build(fontCollection, TextAlign::kJustify);
+    REPORTER_ASSERT(reporter, found == 0);
+    auto left = build(fontCollection, TextAlign::kLeft);
+    REPORTER_ASSERT(reporter, found == 1);
+    REPORTER_ASSERT(reporter, boxes(justified.get()) == referenceJustified);
+    REPORTER_ASSERT(reporter, boxes(left.get()) == referenceLeft);
+
+    // The runs of the paragraph that was shaped first are gone, the others still have the data
+    justified.reset();
+    auto again = build(fontCollection, TextAlign::kJustify);
+    REPORTER_ASSERT(reporter, found == 2);
+    REPORTER_ASSERT(reporter, boxes(again.get()) == referenceJustified);
+    REPORTER_ASSERT(reporter, boxes(left.get()) == referenceLeft);
+    fontCollection->getParagraphCache()->setChecker([](ParagraphImpl*, const char*, bool) {});
+}
+
+// ExtendedVisitorInfo::positions can be changed: the change stays in the glyph data. If the
+// paragraph was not painted or visited yet, the next paint() draws the glyphs at the changed
+// positions. paint() and visit() build the text blobs one time for each layout().
+DEF_TEST(SkParagraph_ExtendedVisitPositionsAreWritable, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->disableFontFallback();
+
+    TextStyle style;
+    style.setFontFamilies({SkString("Roboto")});
+    style.setFontSize(20);
+    style.setColor(SK_ColorBLACK);
+    ParagraphStyle paragraphStyle;
+    paragraphStyle.setTextStyle(style);
+
+    auto build = [&] {
+        ParagraphBuilderImpl builder(paragraphStyle, fontCollection, get_unicode());
+        builder.pushStyle(style);
+        builder.addText("Hello world");
+        auto paragraph = builder.Build();
+        paragraph->layout(300);
+        return paragraph;
+    };
+    // The first row that has a pixel which is not white
+    auto firstInkRow = [](Paragraph* paragraph) {
+        SkBitmap bitmap;
+        bitmap.allocN32Pixels(300, 100);
+        SkCanvas canvas(bitmap);
+        canvas.clear(SK_ColorWHITE);
+        paragraph->paint(&canvas, 0, 0);
+        for (int y = 0; y < bitmap.height(); ++y) {
+            for (int x = 0; x < bitmap.width(); ++x) {
+                if (bitmap.getColor(x, y) != SK_ColorWHITE) {
+                    return y;
+                }
+            }
+        }
+        return -1;
+    };
+
+    auto reference = build();
+    int referenceRow = firstInkRow(reference.get());
+    REPORTER_ASSERT(reporter, referenceRow >= 0);
+
+    auto paragraph = build();
+    int glyphs = 0;
+    SkPoint* firstPosition = nullptr;
+    paragraph->extendedVisit([&](int, const Paragraph::ExtendedVisitorInfo* info) {
+        for (int i = 0; info && i < info->count; ++i) {
+            info->positions[i].fY += 30;
+            ++glyphs;
+        }
+        if (info && !firstPosition) {
+            firstPosition = info->positions;
+        }
+    });
+    REPORTER_ASSERT(reporter, glyphs == 11);
+
+    // The pointer stays valid, and the paragraph keeps the change
+    int checked = 0;
+    paragraph->extendedVisit([&](int, const Paragraph::ExtendedVisitorInfo* info) {
+        if (info && checked++ == 0) {
+            REPORTER_ASSERT(reporter, info->positions == firstPosition);
+        }
+        for (int i = 0; info && i < info->count; ++i) {
+            REPORTER_ASSERT(reporter, info->positions[i].fY == 30);
+        }
+    });
+    REPORTER_ASSERT(reporter, firstInkRow(paragraph.get()) == referenceRow + 30);
+}
+
+namespace {
+// Vocalized Arabic: every harakah is a mark that HarfBuzz places with a non-zero glyph offset
+constexpr char16_t kVocalizedArabic[] =
+        u"\u0645\u064E\u0631\u0652\u062D\u064E\u0628\u064B\u0627 "
+        u"\u0634\u064F\u0643\u0652\u0631\u064B\u0627 "
+        u"\u0645\u064E\u0631\u0652\u062D\u064E\u0628\u064B\u0627";
+
+std::unique_ptr<Paragraph> buildVocalizedArabic(sk_sp<FontCollection> fontCollection,
+                                                const ParagraphStyle& paragraphStyle,
+                                                SkScalar width) {
+    TextStyle arabic;
+    arabic.setFontFamilies({SkString("Noto Naskh Arabic")});
+    arabic.setFontSize(20);
+    arabic.setColor(SK_ColorBLACK);
+    ParagraphBuilderImpl builder(paragraphStyle, fontCollection, get_unicode());
+    builder.pushStyle(arabic);
+    builder.addText(kVocalizedArabic);
+    builder.pop();
+    auto paragraph = builder.Build();
+    paragraph->layout(width);
+    return paragraph;
+}
+
+std::vector<SkPoint> drawnPositions(Paragraph* paragraph) {
+    std::vector<SkPoint> positions;
+    paragraph->visit([&](int, const Paragraph::VisitorInfo* info) {
+        for (int i = 0; info && i < info->count; ++i) {
+            positions.push_back(info->positions[i]);
+        }
+    });
+    return positions;
+}
+
+bool hasNonZeroOffset(const Run& run) {
+    bool nonZero = false;
+    for (auto offset : run.offsets()) {
+        nonZero |= offset != SkPoint{0, 0};
+    }
+    return nonZero;
+}
+}  // namespace
+
+// The ellipsis is shaped outside OneLineShaper, and its marks still need their offsets
+DEF_TEST(SkParagraph_EllipsisKeepsGlyphOffsets, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->disableFontFallback();
+
+    ParagraphStyle paragraphStyle;
+    paragraphStyle.setMaxLines(1);
+    paragraphStyle.setEllipsis(std::u16string(u"\u0628\u064E\u0628\u064E"));
+    paragraphStyle.setTextDirection(TextDirection::kRtl);
+    auto paragraph = buildVocalizedArabic(fontCollection, paragraphStyle, 120);
+
+    auto impl = static_cast<ParagraphImpl*>(paragraph.get());
+    REPORTER_ASSERT(reporter, impl->lines().size() == 1);
+    const Run* ellipsis = impl->lines()[0].ellipsis();
+    REPORTER_ASSERT(reporter, ellipsis != nullptr);
+    if (ellipsis) {
+        REPORTER_ASSERT(reporter, hasNonZeroOffset(*ellipsis));
+    }
+}
+
+// A paragraph built from the cache shares the glyph data, offsets included, with the
+// paragraph that filled the cache, so both draw the same glyph positions
+DEF_TEST(SkParagraph_CachedRunsKeepGlyphOffsets, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->disableFontFallback();
+    fontCollection->getParagraphCache()->reset();
+    fontCollection->getParagraphCache()->turnOn(true);
+
+    ParagraphStyle paragraphStyle;
+    auto cold = buildVocalizedArabic(fontCollection, paragraphStyle, 1000);
+    REPORTER_ASSERT(reporter, fontCollection->getParagraphCache()->count() == 1);
+    auto cached = buildVocalizedArabic(fontCollection, paragraphStyle, 1000);
+
+    auto cachedImpl = static_cast<ParagraphImpl*>(cached.get());
+    bool anyOffsets = false;
+    for (auto& run : cachedImpl->runs()) {
+        anyOffsets |= hasNonZeroOffset(run);
+    }
+    REPORTER_ASSERT(reporter, anyOffsets);
+    REPORTER_ASSERT(reporter, drawnPositions(cold.get()) == drawnPositions(cached.get()));
+    fontCollection->getParagraphCache()->turnOn(false);
+}
+
+// A run keeps glyph offsets only if one of them is not zero, and the drawn glyphs use them
+DEF_TEST(SkParagraph_GlyphOffsetsOnlyWhenNeeded, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->disableFontFallback();
+
+    TextStyle latin;
+    latin.setFontFamilies({SkString("Roboto")});
+    latin.setFontSize(20);
+    latin.setColor(SK_ColorBLACK);
+    TextStyle arabic = latin;
+    // U+2605 is not in Noto Naskh Arabic, so the Arabic run is cut into pieces around it
+    arabic.setFontFamilies({SkString("Noto Naskh Arabic"), SkString("Noto Sans CJK JP")});
+    ParagraphStyle paragraphStyle;
+    paragraphStyle.setTextStyle(latin);
+    ParagraphBuilderImpl builder(paragraphStyle, fontCollection, get_unicode());
+    builder.pushStyle(latin);
+    builder.addText("Hello ");
+    builder.pop();
+    builder.pushStyle(arabic);
+    builder.addText(
+            u"\u0645\u064E\u0631\u0652\u062D\u064E\u0628\u064B\u0627\u2605"
+            u"\u0634\u064F\u0643\u0652\u0631\u064B\u0627");
+    builder.pop();
+    auto paragraph = builder.Build();
+    paragraph->layout(1000);
+
+    auto impl = static_cast<ParagraphImpl*>(paragraph.get());
+    int runsWithOffsets = 0;
+    for (auto& run : impl->runs()) {
+        SkString family;
+        run.font().getTypeface()->getFamilyName(&family);
+        if (family.equals("Roboto")) {
+            REPORTER_ASSERT(reporter, run.offsets().empty());
+        } else if (family.equals("Noto Naskh Arabic")) {
+            bool nonZero = false;
+            for (auto offset : run.offsets()) {
+                nonZero |= offset != SkPoint{0, 0};
+            }
+            REPORTER_ASSERT(reporter, nonZero);
+            runsWithOffsets += nonZero;
+        }
+    }
+    REPORTER_ASSERT(reporter, runsWithOffsets == 2);
+
+    // The marks are drawn above and below the letters
+    bool movedUpOrDown = false;
+    paragraph->visit([&](int, const Paragraph::VisitorInfo* info) {
+        for (int i = 0; info && i < info->count; ++i) {
+            movedUpOrDown |= info->positions[i].fY != 0;
+        }
+    });
+    REPORTER_ASSERT(reporter, movedUpOrDown);
+}
+
+// Letter spacing is part of the cluster widths that line breaking and intrinsic widths add up,
+// so a left aligned line must draw and report its glyphs inside that width, even when only the
+// start of the line is letter spaced
+DEF_TEST(SkParagraph_LetterSpacingStaysInsideLineWidth, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->disableFontFallback();
+
+    TextStyle plain;
+    plain.setFontFamilies({SkString("Roboto"), SkString("Noto Naskh Arabic")});
+    plain.setFontSize(14);
+    plain.setColor(SK_ColorBLACK);
+    TextStyle spaced = plain;
+    spaced.setLetterSpacing(30);
+    TextStyle tight = plain;
+    tight.setLetterSpacing(-4);
+
+    using Segments = std::vector<std::pair<const TextStyle*, const char*>>;
+    auto build = [&](size_t maxLines, const Segments& segments, int count,
+                     TextDirection direction = TextDirection::kLtr) {
+        ParagraphStyle paragraphStyle;
+        paragraphStyle.setTextStyle(plain);
+        paragraphStyle.setMaxLines(maxLines);
+        paragraphStyle.setTextDirection(direction);
+        // Right or centered lines replace the shift with the alignment offset
+        paragraphStyle.setTextAlign(TextAlign::kLeft);
+        ParagraphBuilderImpl builder(paragraphStyle, fontCollection, get_unicode());
+        for (int i = 0; i < count; ++i) {
+            for (auto& [style, text] : segments) {
+                builder.pushStyle(*style);
+                builder.addText(text);
+                builder.pop();
+            }
+        }
+        return builder.Build();
+    };
+
+    auto checkInside = [&](Paragraph* paragraph, SkScalar width, bool checkBoxes = true) {
+        const SkScalar epsilon = 0.01f;
+        SkScalar drawnLeft = 0;
+        SkScalar drawnRight = 0;
+        paragraph->visit([&](int, const Paragraph::VisitorInfo* info) {
+            if (!info) {
+                return;
+            }
+            std::vector<SkScalar> advances(SkToSizeT(info->count));
+            info->font.getWidths({info->glyphs, SkToSizeT(info->count)}, advances);
+            for (int i = 0; i < info->count; ++i) {
+                SkScalar x = info->origin.fX + info->positions[i].fX;
+                drawnLeft = std::min(drawnLeft, x);
+                drawnRight = std::max(drawnRight, x + advances[i]);
+            }
+        });
+        REPORTER_ASSERT(reporter, drawnLeft >= -epsilon, "%f", drawnLeft);
+        REPORTER_ASSERT(reporter, drawnRight <= width + epsilon, "%f > %f", drawnRight, width);
+        if (!checkBoxes) {
+            return;
+        }
+        auto boxes = paragraph->getRectsForRange(
+                0, 1000, RectHeightStyle::kTight, RectWidthStyle::kTight);
+        REPORTER_ASSERT(reporter, !boxes.empty());
+        for (auto& box : boxes) {
+            REPORTER_ASSERT(reporter, box.rect.fLeft >= -epsilon, "%f", box.rect.fLeft);
+            REPORTER_ASSERT(reporter, box.rect.fRight <= width + epsilon,
+                            "%f > %f", box.rect.fRight, width);
+        }
+    };
+
+    // Lines end with plain text after letter spaced text; maxLines makes Flutter clip the text
+    // at the max intrinsic width
+    auto clipped = build(3, {{&spaced, "-1 12345"}, {&plain, "67890\n"}}, 5);
+    clipped->layout(1000);
+    REPORTER_ASSERT(reporter, clipped->didExceedMaxLines());
+    checkInside(clipped.get(), clipped->getMaxIntrinsicWidth());
+    checkInside(clipped.get(), clipped->getLongestLine());
+
+    // A letter spaced start followed by a long plain word that wraps at the paragraph width
+    auto wrapped = build(std::numeric_limits<size_t>::max(),
+                         {{&spaced, "12345"},
+                          {&plain, "678901234567890123456789012345678901234567890"}}, 1);
+    wrapped->layout(300);
+    REPORTER_ASSERT(reporter, wrapped->lineNumber() > 1);
+    checkInside(wrapped.get(), 300);
+
+    // The line ends with negative letter spacing, which must not move the line left; the last
+    // glyph still draws its whole advance, 4 px past its tight cell
+    auto negative = build(1, {{&spaced, "12345"}, {&tight, "67890"}}, 1);
+    negative->layout(1000);
+    checkInside(negative.get(), negative->getMaxIntrinsicWidth() + 4);
+
+    // The line ends with a cursive script, which gets no letter spacing
+    auto cursive = build(1, {{&spaced, "12345 \u0645\u0631\u062D\u0628\u0627"}}, 1);
+    cursive->layout(1000);
+    checkInside(cursive.get(), cursive->getMaxIntrinsicWidth());
+
+    // Glyphs of right to left runs are laid out left to right too, each with its spacing on the
+    // right, so the visually rightmost cluster decides whether the shift fits
+    const char* spacedHebrew = "\u05D0\u05D1\u05D2\u05D3\u05D4";
+    const char* plainHebrew = "\u05D5\u05D6\u05D7\u05D8\u05D9";
+    auto drawnLeft = [](Paragraph* paragraph) {
+        SkScalar left = SK_ScalarMax;
+        paragraph->visit([&](int, const Paragraph::VisitorInfo* info) {
+            if (info) {
+                left = std::min(left, info->origin.fX + info->positions[0].fX);
+            }
+        });
+        return left;
+    };
+
+    // Right to left text with a letter spaced logical start: that start is the visually
+    // rightmost cluster, so the line fits with the shift and keeps it. Only the ink is checked:
+    // the box of a right to left cluster includes its spacing even at the visual line end
+    auto rtl = build(1, {{&spaced, spacedHebrew}, {&plain, plainHebrew}}, 1,
+                     TextDirection::kRtl);
+    rtl->layout(1000);
+    checkInside(rtl.get(), rtl->getMaxIntrinsicWidth(), /*checkBoxes=*/false);
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(drawnLeft(rtl.get()), 15), "%f",
+                    drawnLeft(rtl.get()));
+
+    // A right to left run at the end of a left to right line, letter spaced only at its logical
+    // end: its visually rightmost cluster is plain
+    auto mixed = build(1, {{&spaced, "12345"}, {&plain, plainHebrew}, {&spaced, spacedHebrew}},
+                       1);
+    mixed->layout(1000);
+    checkInside(mixed.get(), mixed->getMaxIntrinsicWidth());
+}
+
+// When an unresolved combining mark attaches to the non-initial codepoint of a multi-char
+// ligature, clusteredText must expand both the glyph range and text range to the whole ligature
+DEF_TEST(SkParagraph_LigatureWithUnresolvedMark, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->disableFontFallback();
+
+    auto buildAndLayout = [&](const char* text,
+                              std::vector<SkString> families,
+                              TextDirection dir = TextDirection::kLtr) {
+        ParagraphStyle paragraphStyle;
+        paragraphStyle.setTextDirection(dir);
+        TextStyle textStyle;
+        textStyle.setFontFamilies(std::move(families));
+        textStyle.setFontSize(20);
+        textStyle.setColor(SK_ColorBLACK);
+        paragraphStyle.setTextStyle(textStyle);
+
+        ParagraphBuilderImpl builder(paragraphStyle, fontCollection, get_unicode());
+        builder.pushStyle(textStyle);
+        builder.addText(text, strlen(text));
+        builder.pop();
+        auto paragraph = builder.Build();
+        paragraph->layout(1000);
+        return paragraph;
+    };
+
+    // Run-start LTR ligature + missing U+064E must keep the unresolved text range at [0, 4)
+    {
+        auto p = buildAndLayout("fi\xD9\x8E", {SkString("Roboto")});
+        auto* impl = static_cast<ParagraphImpl*>(p.get());
+        REPORTER_ASSERT(reporter, impl->runs().size() == 1);
+        if (impl->runs().size() == 1) {
+            REPORTER_ASSERT(reporter, impl->run(0).textRange() == TextRange(0, 4));
+        }
+    }
+
+    // LTR mid-run ligature + missing U+064E without fallback: cluster indexes stay inside run
+    {
+        auto p = buildAndLayout("afi\xD9\x8E", {SkString("Roboto")});
+        auto* impl = static_cast<ParagraphImpl*>(p.get());
+        REPORTER_ASSERT(reporter, !impl->runs().empty());
+        for (const auto& run : impl->runs()) {
+            REPORTER_ASSERT(reporter, run.size() > 0);
+            for (size_t i = 0; i <= run.size(); ++i) {
+                size_t ci = run.globalClusterIndex(i);
+                REPORTER_ASSERT(reporter, ci >= run.textRange().start && ci <= run.textRange().end);
+            }
+        }
+    }
+
+    // LTR mid-run ligature + U+064E resolved by secondary family must not drop 'f'
+    {
+        auto p = buildAndLayout("afi\xD9\x8E", {SkString("Roboto"), SkString("Noto Naskh Arabic")});
+        auto refFi = buildAndLayout("fi\xD9\x8E", {SkString("Noto Naskh Arabic")});
+        auto* impl = static_cast<ParagraphImpl*>(p.get());
+        REPORTER_ASSERT(reporter, p->unresolvedGlyphs() == 0);
+        REPORTER_ASSERT(reporter, impl->runs().size() == 2);
+        if (impl->runs().size() == 2) {
+            REPORTER_ASSERT(reporter, impl->run(0).textRange() == TextRange(0, 1));
+            REPORTER_ASSERT(reporter, impl->run(1).textRange() == TextRange(1, 5));
+            REPORTER_ASSERT(
+                    reporter,
+                    SkScalarNearlyEqual(
+                            impl->run(1).advance().fX, refFi->getMaxIntrinsicWidth(), EPSILON100));
+        }
+    }
+
+    // RTL lam-alef ligature + U+0657 missing in Katibeh must not duplicate alef in fallback
+    {
+        auto p = buildAndLayout("\xD8\xA8\xD9\x84\xD8\xA7\xD9\x97",
+                                {SkString("Katibeh"), SkString("Noto Naskh Arabic")},
+                                TextDirection::kRtl);
+        auto refLamAlef = buildAndLayout(
+                "\xD9\x84\xD8\xA7\xD9\x97", {SkString("Noto Naskh Arabic")}, TextDirection::kRtl);
+        auto* impl = static_cast<ParagraphImpl*>(p.get());
+        REPORTER_ASSERT(reporter, p->unresolvedGlyphs() == 0);
+        REPORTER_ASSERT(reporter, impl->runs().size() == 2);
+        if (impl->runs().size() == 2) {
+            REPORTER_ASSERT(reporter, impl->run(0).textRange() == TextRange(0, 2));
+            REPORTER_ASSERT(reporter, impl->run(1).textRange() == TextRange(2, 8));
+            REPORTER_ASSERT(reporter,
+                            SkScalarNearlyEqual(impl->run(1).advance().fX,
+                                                refLamAlef->getMaxIntrinsicWidth(),
+                                                EPSILON100));
+        }
+    }
+}
+
+DEF_TEST(SkParagraph_EllipsisAfterHardLineBreak, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+
+    auto build = [&](const char* text, size_t maxLines, const char* family = "Roboto",
+                     TextDirection dir = TextDirection::kLtr, SkScalar width = 1000) {
+        ParagraphStyle paragraphStyle;
+        paragraphStyle.turnHintingOff();
+        if (maxLines > 0) {
+            paragraphStyle.setMaxLines(maxLines);
+        }
+        paragraphStyle.setEllipsis(u"\u2026");
+        paragraphStyle.setTextDirection(dir);
+        TextStyle textStyle;
+        textStyle.setFontFamilies({SkString(family)});
+        textStyle.setFontSize(20);
+        paragraphStyle.setTextStyle(textStyle);
+        ParagraphBuilderImpl builder(paragraphStyle, fontCollection, get_unicode());
+        builder.addText(text);
+        auto paragraph = builder.Build();
+        paragraph->layout(width);
+        // Painting runs the debug checks of the line geometry
+        SkCanvas canvas(SkIsFinite(width) ? SkScalarCeilToInt(width) : 1000, 1000);
+        paragraph->paint(&canvas, 0, 0);
+        return paragraph;
+    };
+    // Returns the index of the only line with the ellipsis, or -1 if there is none
+    auto ellipsisLine = [&](Paragraph* paragraph, size_t expectedLines) {
+        auto* impl = static_cast<ParagraphImpl*>(paragraph);
+        REPORTER_ASSERT(reporter, impl->lines().size() == expectedLines);
+        int found = -1;
+        for (size_t i = 0; i < impl->lines().size(); ++i) {
+            if (impl->lines()[i].ellipsis() != nullptr) {
+                REPORTER_ASSERT(reporter, found == -1);
+                found = SkToInt(i);
+            }
+        }
+        return found;
+    };
+    auto check = [&](const char* text, size_t maxLines, size_t expectedLines) {
+        return ellipsisLine(build(text, maxLines).get(), expectedLines);
+    };
+
+    // Nothing is hidden: a single final line break, or no line limit at all
+    REPORTER_ASSERT(reporter, check("AAA\n", 1, 1) == -1);
+    REPORTER_ASSERT(reporter, check("AAA\nBBB", 0, 2) == -1);
+    REPORTER_ASSERT(reporter, check("AAA\nBBB", 2, 2) == -1);
+    REPORTER_ASSERT(reporter,
+                    ellipsisLine(build("AAA\n", 1, "Roboto", TextDirection::kLtr,
+                                       SK_ScalarInfinity).get(), 1) == -1);
+#ifdef SK_IGNORE_ELLIPSIZE_TRUNCATED_LINES
+    REPORTER_ASSERT(reporter, check("AAA\n\n", 1, 1) == -1);
+    REPORTER_ASSERT(reporter, check("AAA\n   ", 1, 1) == -1);
+    REPORTER_ASSERT(reporter, check("AAA\nBBB", 1, 1) == -1);
+    REPORTER_ASSERT(reporter, check("AAA\n\nBBB", 2, 2) == -1);
+    REPORTER_ASSERT(reporter, check("\n\n", 1, 1) == -1);
+    REPORTER_ASSERT(reporter,
+                    ellipsisLine(build("AAA\nBBB", 1, "Roboto", TextDirection::kLtr,
+                                       SK_ScalarInfinity).get(), 1) == -1);
+#else
+    // Text after the last visible hard line break is hidden, even if it is blank
+    REPORTER_ASSERT(reporter, check("AAA\n\n", 1, 1) == 0);
+    REPORTER_ASSERT(reporter, check("AAA\n   ", 1, 1) == 0);
+    REPORTER_ASSERT(reporter, check("AAA\nBBB", 1, 1) == 0);
+    REPORTER_ASSERT(reporter, check("AAA\n\nBBB", 2, 2) == 1);
+    REPORTER_ASSERT(reporter, check("\n\n", 1, 1) == 0);
+    auto inf = build("AAA\nBBB", 1, "Roboto", TextDirection::kLtr, SK_ScalarInfinity);
+    REPORTER_ASSERT(reporter, inf->didExceedMaxLines());
+    REPORTER_ASSERT(reporter, ellipsisLine(inf.get(), 1) == 0);
+    REPORTER_ASSERT(reporter,
+                    ellipsisLine(build("\xD8\xA8\xD8\xAA\n\xD8\xA8", 1, "Katibeh",
+                                       TextDirection::kRtl).get(), 1) == 0);
+
+    // As on Android and the web, the spaces before the line break stay in front of the
+    // ellipsis while they fit; the line break itself never stays
+    auto plain = build("AAAAAA", 1);
+    SkScalar plainWidth = static_cast<ParagraphImpl*>(plain.get())->lines()[0].width();
+    auto unlimited = build("AAAAAA      \nB", 0);
+    auto& unlimitedLine = static_cast<ParagraphImpl*>(unlimited.get())->lines()[0];
+    SkScalar spacedWidth = unlimitedLine.width() + unlimitedLine.spacesWidth();
+    SkScalar spaceWidth = (spacedWidth - plainWidth) / 6;
+    REPORTER_ASSERT(reporter, spaceWidth > 0);
+    auto spaces = build("AAAAAA      \nB", 1);
+    REPORTER_ASSERT(reporter, ellipsisLine(spaces.get(), 1) == 0);
+    auto* impl = static_cast<ParagraphImpl*>(spaces.get());
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(impl->lines()[0].widthWithoutEllipsis(),
+                                                  spacedWidth));
+    std::vector<LineMetrics> metrics;
+    spaces->getLineMetrics(metrics);
+    REPORTER_ASSERT(reporter, metrics[0].fEndExcludingWhitespaces == 12);
+    REPORTER_ASSERT(reporter, metrics[0].fEndIndex == 12);
+    REPORTER_ASSERT(reporter, impl->lines()[0].spacesWidth() == 0);
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(impl->widthWithTrailingSpaces(),
+                                                  impl->lines()[0].widthWithoutEllipsis()));
+    SkScalar ellipsisWidth = impl->lines()[0].ellipsis()->advance().fX;
+
+    // Spaces that do not fit with the ellipsis go one by one, before any glyph
+    SkScalar twoSpaces = plainWidth + 2.5f * spaceWidth + ellipsisWidth;
+    auto trimmed = build("AAAAAA      \nB", 1, "Roboto", TextDirection::kLtr, twoSpaces);
+    REPORTER_ASSERT(reporter, ellipsisLine(trimmed.get(), 1) == 0);
+    trimmed->getLineMetrics(metrics);
+    REPORTER_ASSERT(reporter, metrics[0].fEndIndex == 8, "%zu", metrics[0].fEndIndex);
+    REPORTER_ASSERT(reporter, static_cast<ParagraphImpl*>(trimmed.get())->lines()[0].width() <=
+                              twoSpaces);
+
+    // A blank line keeps its spaces as well, and gets the ellipsis alone if not one space fits
+    auto blank = build("   \nB", 1);
+    REPORTER_ASSERT(reporter, ellipsisLine(blank.get(), 1) == 0);
+    blank->getLineMetrics(metrics);
+    REPORTER_ASSERT(reporter, metrics[0].fEndIndex == 3, "%zu", metrics[0].fEndIndex);
+    auto lone = build("   \nB", 1, "Roboto", TextDirection::kLtr,
+                      ellipsisWidth + 0.5f * spaceWidth);
+    REPORTER_ASSERT(reporter, ellipsisLine(lone.get(), 1) == 0);
+    auto* loneImpl = static_cast<ParagraphImpl*>(lone.get());
+    REPORTER_ASSERT(reporter, loneImpl->lines()[0].widthWithoutEllipsis() == 0);
+
+    // A visible text that fits alone but not with the ellipsis loses its last clusters
+    SkScalar narrow = plainWidth + 1;
+    auto cut = build("AAAAAA\nB", 1, "Roboto", TextDirection::kLtr, narrow);
+    REPORTER_ASSERT(reporter, ellipsisLine(cut.get(), 1) == 0);
+    auto* cutImpl = static_cast<ParagraphImpl*>(cut.get());
+    REPORTER_ASSERT(reporter, cutImpl->lines()[0].widthWithoutEllipsis() < plainWidth);
+    REPORTER_ASSERT(reporter, cutImpl->lines()[0].width() <= narrow);
+    // A visible text that does not fit even one cluster with the ellipsis gets it alone
+    auto alone = build("W\nX", 1, "Roboto", TextDirection::kLtr, ellipsisWidth + 1);
+    REPORTER_ASSERT(reporter, ellipsisLine(alone.get(), 1) == 0);
+
+    // The CR of a CRLF line break is part of the line break, not a space before it
+    auto crlf = build("AAA  \r\nB", 1);
+    REPORTER_ASSERT(reporter, ellipsisLine(crlf.get(), 1) == 0);
+    crlf->getLineMetrics(metrics);
+    REPORTER_ASSERT(reporter, metrics[0].fEndIndex == 5, "%zu", metrics[0].fEndIndex);
+
+    // The ellipsis of an empty line takes the style of its line break, background included
+    TextStyle small;
+    small.setFontFamilies({SkString("Roboto")});
+    small.setFontSize(20);
+    TextStyle large = small;
+    large.setFontSize(40);
+    large.setBackgroundColor(SkPaint(SkColors::kRed));
+    ParagraphStyle paragraphStyle;
+    paragraphStyle.setMaxLines(2);
+    paragraphStyle.setEllipsis(u"\u2026");
+    ParagraphBuilderImpl builder(paragraphStyle, fontCollection, get_unicode());
+    builder.pushStyle(small);
+    builder.addText("AAA\n");
+    builder.pushStyle(large);
+    builder.addText("\nBBB");
+    auto styled = builder.Build();
+    styled->layout(1000);
+    SkBitmap bitmap;
+    bitmap.allocN32Pixels(1000, 200);
+    SkCanvas canvas(bitmap);
+    canvas.clear(SK_ColorWHITE);
+    styled->paint(&canvas, 0, 0);
+    REPORTER_ASSERT(reporter, ellipsisLine(styled.get(), 2) == 1);
+    auto* styledImpl = static_cast<ParagraphImpl*>(styled.get());
+    REPORTER_ASSERT(reporter, styledImpl->lines()[1].ellipsis()->font().getSize() == 40);
+    std::vector<LineMetrics> styledMetrics;
+    styled->getLineMetrics(styledMetrics);
+    int lineTop = SkScalarCeilToInt(styledMetrics[1].fBaseline - styledMetrics[1].fAscent);
+    REPORTER_ASSERT(reporter, bitmap.getColor(2, lineTop + 2) == SK_ColorRED);
+    // A hit on the empty line stays on it, as on any empty line
+    auto hit = styled->getGlyphPositionAtCoordinate(1, styledMetrics[1].fBaseline);
+    REPORTER_ASSERT(reporter, hit.position == 4 && hit.affinity == Affinity::kDownstream);
+
+    // Same for an RTL empty line, on both sides of the ellipsis
+    auto rtl = build("\xD8\xA8\xD8\xAA\n\n\xD8\xA8", 2, "Katibeh", TextDirection::kRtl);
+    REPORTER_ASSERT(reporter, ellipsisLine(rtl.get(), 2) == 1);
+    rtl->getLineMetrics(metrics);
+    for (SkScalar dx : {1.0f, 999.0f, 1001.0f}) {
+        auto rtlHit = rtl->getGlyphPositionAtCoordinate(dx, metrics[1].fBaseline);
+        REPORTER_ASSERT(reporter, rtlHit.position == 3 && rtlHit.affinity == kDownstream,
+                        "%g: %d", dx, rtlHit.position);
+    }
+#endif
 }

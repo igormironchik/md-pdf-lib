@@ -9,6 +9,7 @@
 
 #include "include/core/SkMesh.h"
 #include "include/private/SkAttributes.h"
+#include "include/private/SkOnlyStackAllocatable.h"
 #include "src/core/SkMeshPriv.h"
 #include "src/gpu/BlendFormula.h"
 #include "src/gpu/graphite/ContextUtils.h"
@@ -18,7 +19,7 @@
 #include "src/gpu/graphite/RuntimeEffectDictionary.h"
 #include "src/gpu/graphite/ShaderCodeDictionary.h"
 #include "src/gpu/graphite/TextureFormat.h"
-#include "src/gpu/graphite/UniformManager.h"
+#include "src/gpu/graphite/layout/UniformManager.h"
 #include "src/gpu/graphite/render/MeshRenderStep.h"
 #include "src/partition_alloc/raw_ptr.h"
 #include "src/sksl/SkSLString.h"
@@ -513,17 +514,9 @@ std::string get_node_texture_samplers(const ResourceBindingRequirements& binding
         // 1) A backend passes in a non-nullptr outImmutableSamplers param (may be nullptr in
         //    backends or circumstances where we know immutable sampler data is never stored)
         // 2) Any data is stored on the ShaderNode
-        // 3) Whether the ShaderNode snippet's ID matches that of any snippet ID that could store
-        //    immutable sampler data.
-        int32_t snippetId = node->codeSnippetId();
+        // 3) Whether the ShaderNode snippet stores sampler description data
         if (outDescs) {
-            // TODO(b/369846881): Refactor checking snippet ID to instead having a named
-            // snippet requirement flag that we can check here to decrease fragility.
-            if (!node->data().empty() &&
-                (snippetId == static_cast<int32_t>(BuiltInCodeSnippetID::kImageShader) ||
-                 snippetId == static_cast<int32_t>(BuiltInCodeSnippetID::kImageShaderClamp) ||
-                 snippetId == static_cast<int32_t>(BuiltInCodeSnippetID::kCubicImageShader) ||
-                 snippetId == static_cast<int32_t>(BuiltInCodeSnippetID::kHWImageShader))) {
+            if (!node->data().empty() && node->entry()->storesSamplerDescData()) {
                 append_sampler_descs(node->data(), *outDescs);
             } else {
                 // Add default SamplerDescs for any dynamic samplers to outDescs.
@@ -597,7 +590,8 @@ std::string emit_varyings(const RenderStep* step,
     }
 
     if (emitLocalCoordsVarying) {
-        appendVarying({"localCoordsVar", SkSLType::kFloat2});
+        const auto type = step->usesFloat3LocalCoords() ? SkSLType::kFloat3 : SkSLType::kFloat2;
+        appendVarying({"localCoordsVar", type});
     }
 
     for (const LiftedExpression& expr : liftedExpressions) {
@@ -933,6 +927,8 @@ static constexpr skgpu::BlendInfo gBlendTable[kSkBlendModeCount] = {
 }  // anonymous namespace
 
 struct ShaderInfo::SharedGeneratorData {
+    SK_ONLY_STACK_ALLOCATABLE;
+
     SharedGeneratorData(const Caps* caps,
                         const ShaderCodeDictionary* dict,
                         const RuntimeEffectDictionary* rteDict,
@@ -951,7 +947,8 @@ struct ShaderInfo::SharedGeneratorData {
             const int availableVaryings =
                     caps->maxVaryings() - kFixedVaryings - step->varyings().size();
 
-            bool canLiftCoords = !step->fragmentColorSkSLLocalCoordsVariable();
+            bool canLiftCoords = !step->fragmentColorSkSLLocalCoordsVariable() &&
+                                 !step->usesFloat3LocalCoords();
             fRootsInfo =
                     key.getRootNodes(caps, dict, rteDict, alloc, availableVaryings, canLiftCoords);
 
@@ -1217,9 +1214,7 @@ void ShaderInfo::generateFragmentSkSL(const Caps* caps,
     SkASSERT(sharedData.fRootsInfo.fSrcColor && sharedData.fRootsInfo.fFinalBlend);
     const ShaderSnippet* srcSnippet
             = dict->getEntry(sharedData.fRootsInfo.fSrcColor->codeSnippetId());
-    // TODO(b/349997190): Once SkEmptyShader doesn't use the passthrough snippet, we can assert
-    // that srcSnippet->needsPriorStageOutput() is false.
-    SkASSERT(!srcSnippet->needsBlenderDstColor());
+    SkASSERT(!srcSnippet->needsPriorStageOutput() && !srcSnippet->needsBlenderDstColor());
     // Final blender node must take both the src color and dst color, and not any local coordinate.
     const ShaderSnippet* blendSnippet
             = dict->getEntry(sharedData.fRootsInfo.fFinalBlend->codeSnippetId());
@@ -1392,14 +1387,14 @@ void ShaderInfo::generateFragmentSkSL(const Caps* caps,
     // root nodes should--at most--be depending on the coordinate when "needsLocalCoords" is true.
     // If the PaintParamsKey violates that structure, this will produce SkSL compile errors.
     ShaderSnippet::Args args = ShaderSnippet::kDefaultArgs;
-    args.fFragCoord = step->fragmentColorSkSLLocalCoordsVariable()
-                            ? step->fragmentColorSkSLLocalCoordsVariable()
-                            : "localCoordsVar";  // the varying added in emit_varyings()
-    // TODO(b/349997190): The paint root node should not depend on any prior stage's output, but
-    // it can happen with how SkEmptyShader is currently mapped to `sk_passthrough`. In this case
-    // it requires that prior stage color to be transparent black. When SkEmptyShader can instead
-    // cause the draw to be skipped, this can go away.
-    args.fPriorStageOutput = "half4(0)";
+    if (step->fragmentColorSkSLLocalCoordsVariable()) {
+        args.fFragCoord = step->fragmentColorSkSLLocalCoordsVariable();
+    } else if (sharedData.fNeedsLocalCoords && step->usesFloat3LocalCoords()) {
+        mainBody += "float2 perspLocalCoords = localCoordsVar.xy / localCoordsVar.z;";
+        args.fFragCoord = "perspLocalCoords";
+    } else {
+        args.fFragCoord = "localCoordsVar";  // the varying added in emit_varyings()
+    }
 
     // Calculate the src color and stash its output variable in `args`
     args.fPriorStageOutput = srcColorRoot->invokeAndAssign(*this, args, &mainBody);
@@ -1509,8 +1504,10 @@ void ShaderInfo::generateFragmentSkSL(const Caps* caps,
                 fBlendInfo = SK_UNSAFE_TODO(gBlendTable[static_cast<int>(*finalBlendMode)]);
                 mainBody += emit_advanced_blend_color_output("sk_FragColor", outColor);
             } else {
-                // Porter-Duff blend modes can utilize BlendFormula.
-                // TODO: Determine whether draw is opaque and pass that to GetBlendFormula.
+                // Porter-Duff blend modes can utilize BlendFormula. Notice that `isOpaque` is false
+                // so that blend formulas default to unknown opacity without optimization.
+                // Opacity-based blend mode reductions in Graphite are performed when constructing
+                // the key in ShadingParams::toKey().
                 BlendFormula coverageBlendFormula =
                         finalCoverage == Coverage::kLCD
                                 ? skgpu::GetLCDBlendFormula(*finalBlendMode)
@@ -1612,7 +1609,8 @@ void ShaderInfo::generateVertexSkSL(const Caps* caps,
     // Vertex shader function declaration
     std::string mainBody = "void main() {";
     // Create stepLocalCoords which render steps can write to.
-    mainBody += "float2 stepLocalCoords = float2(0);";
+    const char* type = step->usesFloat3LocalCoords() ? "float3" : "float2";
+    SkSL::String::appendf(&mainBody, "%s stepLocalCoords = %s(0);", type, type);
 
     // We define the SSBO index variable immediately if the VS is using storage buffers. This covers
     // both the "Step Uniforms" case and the "Lifted Uniforms Only" case.

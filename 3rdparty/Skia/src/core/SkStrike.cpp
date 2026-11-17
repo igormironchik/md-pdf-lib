@@ -11,10 +11,12 @@
 #include "include/core/SkFontStyle.h"
 #include "include/core/SkMatrix.h"
 #include "include/core/SkPath.h"
+#include "include/core/SkSpan.h"
 #include "include/core/SkString.h"
 #include "include/core/SkTraceMemoryDump.h"
 #include "include/core/SkTypeface.h"
 #include "include/private/SkDebug.h"
+#include "include/private/SkOnlyStackAllocatable.h"
 #include "include/private/SkTFitsIn.h"
 #include "src/core/SkGlyph.h"
 #include "src/core/SkMask.h"
@@ -59,6 +61,8 @@ SkStrike::SkStrike(SkStrikeCache* strikeCache,
 
 class SK_SCOPED_CAPABILITY SkStrike::Monitor {
 public:
+    SK_ONLY_STACK_ALLOCATABLE;
+
     Monitor(SkStrike* strike) SK_ACQUIRE(strike->fStrikeLock)
             : fStrike{strike} {
         fStrike->lock();
@@ -222,20 +226,18 @@ SkSpan<const SkGlyph*> SkStrike::metrics(
 }
 
 void SkStrike::getWidthsStrided(unsigned count,
-                                const uint32_t* first_glyph,
+                                SkSpan<const uint32_t> glyphs,
                                 unsigned glyph_stride_32,
-                                SkScalar* first_advance,
+                                SkSpan<SkScalar> advances,
                                 unsigned advance_stride_32,
                                 SkScalar scale) {
     Monitor m{this};
-    const uint32_t* g_ptr = first_glyph;
-    SkScalar* a_ptr = first_advance;
     for (unsigned i = 0; i < count; ++i) {
       // TODO(https://crbug.com/skia/521216502): Handle large glyph ids.
-        SkGlyph* glyph = this->glyph(SkPackedGlyphID{static_cast<SkGlyphID>(*g_ptr)});
-        *a_ptr = glyph->advanceX() * scale;
-        g_ptr += glyph_stride_32;
-        a_ptr += advance_stride_32;
+        SkGlyph* glyph = this->glyph(SkPackedGlyphID{static_cast<SkGlyphID>(glyphs[0])});
+        advances[0] = glyph->advanceX() * scale;
+        glyphs = glyphs.subspan(glyph_stride_32);
+        advances = advances.subspan(advance_stride_32);
     }
 }
 

@@ -16,6 +16,7 @@
 #include "src/gpu/ganesh/GrOpFlushState.h"
 #include "src/gpu/ganesh/GrOpsRenderPass.h"
 #include "src/gpu/ganesh/gl/GrGLGpu.h"
+#include "src/partition_alloc/raw_ptr.h"
 
 #include <array>
 #include <cstddef>
@@ -59,6 +60,11 @@ private:
     void bindInstanceBuffer(const GrBuffer*, int baseInstance);
     void bindVertexBuffer(const GrBuffer*, int baseVertex);
 
+    // For non-indexed (glDrawArrays*) draws: if the vertex buffer binding was deferred in
+    // onBindBuffers, binds it now offset by baseVertex. Returns the baseVertex value that should
+    // be passed to the draw call (0 if the buffer was rebased, otherwise the original baseVertex).
+    int rebaseVertexBufferForDrawArrays(int baseVertex);
+
     const void* offsetForBaseIndex(int baseIndex) const {
         if (!fIndexPointer) {
             // nullptr != 0. Adding an offset to a nullptr is undefined.
@@ -99,7 +105,7 @@ private:
     void onClear(const GrScissorState& scissor, std::array<float, 4> color) override;
     void onClearStencilClip(const GrScissorState& scissor, bool insideStencilMask) override;
 
-    GrGLGpu* const fGpu;
+    const raw_ptr<GrGLGpu> fGpu;
 
     bool fUseMultisampleFBO;
     SkIRect fContentBounds;
@@ -108,11 +114,11 @@ private:
 
     // Per-pipeline state.
     GrPrimitiveType fPrimitiveType;
-    GrGLAttribArrayState* fAttribArrayState = nullptr;
+    raw_ptr<GrGLAttribArrayState> fAttribArrayState;
 
     // If using an index buffer, this gets set during onBindBuffers. It is either the CPU address of
     // the indices, or nullptr if they reside physically in GPU memory.
-    const uint16_t* fIndexPointer;
+    raw_ptr<const uint16_t, DanglingUntriaged | AllowPtrArithmetic> fIndexPointer;
 
     // This tracks whether or not we bound the respective buffers during the bindBuffers call.
     SkDEBUGCODE(bool fDidBindVertexBuffer = false;)

@@ -18,10 +18,8 @@
 #include "include/private/SkEnumBitMask.h"
 #include "src/core/SkSLTypeShared.h"
 #include "src/gpu/BufferWriter.h"
-#include "src/gpu/graphite/Attribute.h"
 #include "src/gpu/graphite/ContextUtils.h"
 #include "src/gpu/graphite/DrawTypes.h"
-#include "src/gpu/graphite/PipelineData.h"
 #include "src/gpu/graphite/TextureProxy.h"
 #include "src/gpu/graphite/draw/DrawOrder.h"
 #include "src/gpu/graphite/draw/DrawParams.h"
@@ -30,6 +28,8 @@
 #include "src/gpu/graphite/geom/Geometry.h"
 #include "src/gpu/graphite/geom/Rect.h"
 #include "src/gpu/graphite/geom/Transform.h"
+#include "src/gpu/graphite/layout/Attribute.h"
+#include "src/gpu/graphite/layout/PipelineData.h"
 #include "src/gpu/graphite/render/CommonDepthStencilSettings.h"
 
 #include <cstdint>
@@ -66,7 +66,8 @@ CoverageMaskRenderStep::CoverageMaskRenderStep(Layout layout)
                                              | Flags::kOutsetBoundsForAA
                                              | Flags::kInverseFillsScissor
                                              | Flags::kNoSelfIntersections
-                                             | Flags::kAppendInstances,
+                                             | Flags::kAppendInstances
+                                             | Flags::kFloat3LocalCoords,
                      /*uniforms=*/{{"maskToDeviceRemainder", SkSLType::kFloat3x3}},
                      PrimitiveType::kTriangleStrip,
                      /*stencilSettings=*/{},
@@ -101,7 +102,7 @@ CoverageMaskRenderStep::CoverageMaskRenderStep(Layout layout)
 
 std::string CoverageMaskRenderStep::vertexSkSL(const RootNodesInfo&) const {
     // Returns the body of a vertex function, which must define a float4 devPosition variable and
-    // must write to an already-defined float2 stepLocalCoords variable.
+    // must write to an already-defined float3 stepLocalCoords variable.
     return "float4 devPosition = coverage_mask_vertex_fn("
                     "float2(sk_VertexID >> 1, sk_VertexID & 1), "
                     "maskToDeviceRemainder, drawBounds, maskBoundsIn, deviceOrigin, "
@@ -187,7 +188,8 @@ void CoverageMaskRenderStep::writeVertices(DrawWriter* dw,
 
     // Move 'drawBounds' and 'maskBounds' into the atlas coordinate space, then adjust the
     // device translation to undo the atlas origin automatically in the vertex shader.
-    skvx::float2 textureOrigin = skvx::cast<float>(coverageMask.textureOrigin());
+    skvx::float2 textureOrigin = skvx::cast<float>(skvx::int2{coverageMask.textureOrigin().x(),
+                                                              coverageMask.textureOrigin().y()});
     maskBounds += textureOrigin.xyxy();
     drawBounds += textureOrigin.xyxy();
     deviceOrigin -= textureOrigin;

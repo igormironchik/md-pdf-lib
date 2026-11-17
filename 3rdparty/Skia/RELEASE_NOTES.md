@@ -2,6 +2,30 @@ Skia Graphics Release Notes
 
 This file includes a list of high level updates for each milestone release.
 
+Milestone 159
+-------------
+  * SkYUVAInfo::PlaneConfig::kYUYV, a packed 4:2:2 single-plane YUV config, now holds one 4-channel texel per 2x1 block of pixels (previously one 2-channel texel per pixel): channels 0..3 hold (Y0, U, Y1, V) for each pixel pair, at half the image's horizontal texel dimensions. This matches the documented DXGI view alias for packed 10-bit 4:2:2 textures (e.g. DXGI_FORMAT_Y210 viewed as R16G16B16A16_UNORM, or the GL_RGBA16_EXT image ANGLE exposes for such client buffers), so such textures can be wrapped in SkImages via the existing YUVA machinery. The config is guarded by SK_ENABLE_YUVA_PACKED_422, which is off by default; embedders opt in via SkUserConfig.h.
+  * Skia can now be built for WebAssembly SIMD128 by setting the GN arg `skia_wasm_simd = true`.
+    The CPU raster pipeline then runs four pixels per stage and enables its lowp stages, instead of
+    running one pixel at a time. Such builds need WebAssembly SIMD in the browser (Chrome 91,
+    Firefox 89, Safari 16.4).
+
+* * *
+
+Milestone 158
+-------------
+  * Added `fHdrMetadata` (`const skhdr::Metadata*`) to `SkJpegEncoder::Options`, `SkPngRustEncoder::Options`, and `SkWebpEncoder::Options`, and changed `SkPngEncoder::Options::fHdrMetadata` to `const skhdr::Metadata*`. When provided, the HDR metadata is embedded into the encoded image's ICC profile.
+  * The SkExecutor class is now templated so it can support different work submission models.
+
+    The prior std::function-based model is preserved as SkFunctionalExecutor and SkExecutor.
+
+    A new callback-style model is now supported with SkCallbackExecutor.
+
+    The new SK_GRAPHITE_USE_CALLBACK_EXECUTOR #define can be used to make Graphite take an SkCallbackExecutor in its ContextOptions. Ganesh continues to take an SkFunctionalExecutor.
+  * SkWebpEncoder::Options has a new fMethod field that sets the libwebp compression method (0-6). It defaults to -1, which keeps the previous behavior.
+
+* * *
+
 Milestone 157
 -------------
   * Graphite now requires >= iOS 14.0. This was the first iOS version in which some required C++20 features were added.

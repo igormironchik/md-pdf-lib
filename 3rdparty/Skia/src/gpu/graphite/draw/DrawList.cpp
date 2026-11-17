@@ -38,6 +38,11 @@ std::pair<DrawParams*, Layer*> DrawList::recordDraw(
     SkASSERT(!(renderer->depthStencilFlags() & DepthStencilFlags::kStencil) ||
              ordering.stencilIndex() != DrawOrder::kUnassigned);
 
+    // Device shouldn't be trying to record a draw that would require depth when avoiding depth
+    SkASSERT(!renderer->requiresDepth() || !fAvoidDepth);
+    // Device shouldn't be trying to record depth-only clip draws when avoiding depth
+    SkASSERT(paintID.isValid() || !fAvoidDepth);
+
     // TODO: Add validation that the renderer's expected shape type and stroke params match provided
     const Draw& draw = fDraws.emplace_back(renderer,
                                            this->deduplicateTransform(localToDevice),
@@ -286,8 +291,8 @@ std::unique_ptr<DrawPass> DrawList::snapDrawPass(Recorder* recorder,
 
 void DrawList::reset(LoadOp op, SkColor4f clearColor) {
     SK_SCOPED_DISABLE_PARTITION_ALLOC_SAFETY_CHECKS;
-    fDraws.reset();
     fSortKeys.clear();
+    fDraws.reset();
     DrawListBase::reset(op, clearColor);
 }
 

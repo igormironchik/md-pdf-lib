@@ -1302,9 +1302,12 @@ public:
     void resetToFloodFill();
     bool intersectClipElement(const RawElement& clip);
 
-    // Sync any modifications back to `geometry` and return a Clip object encapsulating the
-    // tracked bounds of the now-clipped draw.
-    Clip toClip(Geometry* geometry, const NonMSAAClip& analyticClip, const SkShader* clipShader);
+    // Sync any modifications back to `geometry` and `style` and return a Clip object encapsulating
+    // the tracked bounds of the now-clipped draw.
+    Clip toClip(Geometry* geometry,
+                SkStrokeRec* style,
+                const NonMSAAClip& analyticClip,
+                const SkShader* clipShader);
 
 private:
     Transform fLocalToDevice;
@@ -1371,21 +1374,24 @@ bool ClipStack::DrawShape::applyStyle(const SkStrokeRec& style, const Rect& devi
         fLocalToDevice = Transform::Identity();
         fShapeMatchesGeometry = false;
     } else {
-        // SkStrokeRec::GetInflationRadius() returns a device-space inflation for hairlines.
         float localOutset = 0.f;
-        if (!style.isFillStyle() && !style.isHairlineStyle()) {
+        if (style.isFillStyle()) {
+            // If the shape projects to a subpixel shape, expand the local bounds by the AA radius
+            // to create a conservative clip query that preserves the oriented bounding box.
+            if (!fShape.inverted() && any(origSize < localAAOutset)) {
+                localOutset = 0.5f * localAAOutset;
+            }
+        } else {
+            // getInflationRadius() does not handle device-space inflation for hairlines, but to
+            // preserve the bounding box in local space for as long as possible, use the
+            // `localAAOutset` as a conservative estimate for the local stroke radius that would
+            // cover the hairline.
+            //
+            // For local strokes that project to a subpixel shape, clamp to the localAAOutset as
+            // well to handle rendering that pads beyond the 1/2px outset in the subpixel case.
+            const float strokeWidth = std::max(localAAOutset, style.getWidth());
             localOutset = fShape.getInflationRadius(
-                    style.getJoin(), style.getMiter(), style.getCap(), style.getWidth());
-        }
-
-        if (style.isHairlineStyle() ||
-            (!style.isFillStyle() && style.getWidth() < localAAOutset) ||
-            (style.isFillStyle() && !fShape.inverted() && any(origSize < localAAOutset))) {
-            // The geometry is a hairline or projects to a subpixel shape, so rendering will not
-            // follow the typical 1/2px outset anti-aliasing that is compatible with clipping.
-            // In this case, apply the local AA radius to the shape to have a conservative clip
-            // query while preserving the oriented bounding box.
-            localOutset += localAAOutset;
+                    style.getJoin(), style.getMiter(), style.getCap(), strokeWidth);
         }
 
         if (localOutset > 0.f) {
@@ -1436,9 +1442,16 @@ void ClipStack::DrawShape::applyScissor(const Rect& scissor) {
     fScissor.intersect(scissor); // For first call, fScissor is infinite so this is assignment
     fOuterBounds.intersect(scissor);
     fInnerBounds.intersect(scissor);
+
+    // An inverse fill whose shape is entirely outside of the scissor covers every pixel that can
+    // be drawn, so it can be replaced with a flood fill.
+    if (fShape.inverted() && fOuterBounds.isEmptyNegativeOrNaN()) {
+        this->resetToFloodFill();
+    }
 }
 
 Clip ClipStack::DrawShape::toClip(Geometry* geometry,
+                                  SkStrokeRec* style,
                                   const NonMSAAClip& analyticClip,
                                   const SkShader* clipShader) {
     if (fShapeWasModified) {
@@ -1452,6 +1465,7 @@ Clip ClipStack::DrawShape::toClip(Geometry* geometry,
             SkASSERT(fEdgeFlags == EdgeAAQuad::Flags::kAll);
             geometry->setShape(fShape);
         }
+        style->setFillStyle();
         // Reconstruct new transformedShapeBounds and outer bounds
         fTransformedShapeBounds = fLocalToDevice.mapRect(fShape.bounds());
         fOuterBounds = fTransformedShapeBounds.makeIntersect(fScissor);
@@ -1469,11 +1483,16 @@ Clip ClipStack::DrawShape::toClip(Geometry* geometry,
 }
 
 void ClipStack::DrawShape::resetToFloodFill() {
-    if (this->shapeCanBeModified() && !fShape.isFloodFill()) {
+    // An inverse-filled shape that is replaced by the clip or scissor can always become a flood
+    // fill.
+    const bool canReset = this->shapeCanBeModified() || fShape.inverted();
+    if (canReset && !fShape.isFloodFill()) {
         fShape.reset();
         fShape.setInverted(true);
         fEdgeFlags = EdgeAAQuad::Flags::kAll;
         fOuterBounds = fInnerBounds = Rect::InfiniteInverted();
+        fShapeMatchesGeometry = true;
+        fShapeCompatibleWithIntersectShape = true;
         fShapeWasModified = true;
     }
 }
@@ -1642,97 +1661,6 @@ void ClipStack::clipShape(const Transform& localToDevice,
 // constructor, so only identity transforms are allowed.
 namespace {
 
-#if defined(SK_GRAPHITE_USE_LEGACY_RRECT_CLIP_SHADER)
-
-AnalyticClip can_apply_analytic_clip(const Shape& shape, const Transform& localToDevice) {
-    if (localToDevice.type() != Transform::Type::kIdentity) {
-        return {};
-    }
-
-    // The circular rrect clip only handles rrect radii >= kRadiusMin, circular radii less than
-    // this are coerced to be rectangular.
-    static constexpr float kRadiusMin = SK_ScalarHalf;
-
-    // Can handle Rect directly.
-    if (shape.isRect()) {
-        return {shape.rect(), kRadiusMin, AnalyticClip::kNone_EdgeFlag, shape.inverted()};
-    }
-
-    // Otherwise we only handle certain kinds of RRects, specifically only approximately simple
-    // circular rrects (e.g. all 4 corners can be described by a single radius value).
-    if (!shape.isRRect()) {
-        return {};
-    }
-
-    const SkRRect& rrect = shape.rrect();
-    if (rrect.isOval() || rrect.isSimple()) {
-        SkVector radii = SkRRectPriv::GetSimpleRadii(rrect);
-        if (radii.fX < kRadiusMin || radii.fY < kRadiusMin) {
-            // In this case the corners are extremely close to rectangular and we collapse the
-            // clip to a rectangular clip.
-            return {rrect.rect(), kRadiusMin, AnalyticClip::kNone_EdgeFlag, shape.inverted()};
-        }
-        if (SkRRectPriv::IsRelativelyCircular(radii.fX, radii.fY, Shape::kDefaultPixelTolerance)) {
-            return {rrect.rect(), radii.fX, AnalyticClip::kAll_EdgeFlag, shape.inverted()};
-        } else {
-            return {};
-        }
-    }
-
-    // If rrect is not an oval or simple, it's either empty, rect, 9-patch, or complex. However,
-    // empty should have been handled by the clip stack, and rect ought to have been simplified
-    // into an explicit Rect shape (already handled above). That leaves 9-patch and complex,
-    // so we check for the "tab" cases - two adjacent circular corners and two square corners.
-    // It just so happens that if a rect RRect slipped through the cracks, we detect it here too.
-    constexpr uint32_t kCornerFlags[4] = {
-        AnalyticClip::kTop_EdgeFlag | AnalyticClip::kLeft_EdgeFlag,
-        AnalyticClip::kTop_EdgeFlag | AnalyticClip::kRight_EdgeFlag,
-        AnalyticClip::kBottom_EdgeFlag | AnalyticClip::kRight_EdgeFlag,
-        AnalyticClip::kBottom_EdgeFlag | AnalyticClip::kLeft_EdgeFlag,
-    };
-    SkScalar circularRadius = 0;
-    uint32_t edgeFlags = 0;
-    int squareCount = 0;
-    for (int corner = 0; corner < 4; ++corner) {
-        SkVector radii = rrect.radii((SkRRect::Corner)corner);
-        // Can only handle circular radii.
-        // Also applies to corners with both zero and non-zero radii.
-        if (!SkRRectPriv::IsRelativelyCircular(radii.fX, radii.fY, Shape::kDefaultPixelTolerance)) {
-            return {};
-        }
-        if (radii.fX < kRadiusMin || radii.fY < kRadiusMin) {
-            // The corner is square, so no need to flag as circular.
-            squareCount++;
-            continue;
-        }
-        // First circular corner seen
-        if (!edgeFlags) {
-            circularRadius = radii.fX;
-        } else if (!SkRRectPriv::IsRelativelyCircular(radii.fX,
-                                                      circularRadius,
-                                                      Shape::kDefaultPixelTolerance)) {
-            // Radius doesn't match previously seen circular radius
-            return {};
-        }
-        edgeFlags |= kCornerFlags[corner];
-    }
-
-    if (edgeFlags == AnalyticClip::kNone_EdgeFlag) {
-        // It's a rect (or coerced to a rect)
-        return {rrect.rect(), kRadiusMin, edgeFlags, shape.inverted()};
-    } else if (edgeFlags == AnalyticClip::kAll_EdgeFlag && squareCount != 0) {
-        // If any rounded corner pairs are non-adjacent or if there are three rounded corners all
-        // edge flags will be set, which is not valid.
-        return {};
-    } else {
-        // At least one corner is rounded, or two adjacent corners are rounded, or all corners
-        // are approximately the same (but not classified as simple due to inexactness).
-        return {rrect.rect(), circularRadius, edgeFlags, shape.inverted()};
-    }
-}
-
-#else
-
 AnalyticClip can_apply_analytic_clip(const Shape& shape, const Transform& localToDevice) {
     if (localToDevice.type() > Transform::Type::kAffine) {
         return {};
@@ -1816,13 +1744,11 @@ AnalyticClip can_apply_analytic_clip(const Shape& shape, const Transform& localT
     return {rect.asSkRect(), radii, xform, shape.inverted()};
 }
 
-#endif // SK_GRAPHITE_USE_LEGACY_RRECT_CLIP_SHADER
-
 }  // anonymous namespace
 
 Clip ClipStack::visitClipStackForDraw(const Transform& localToDevice,
                                       Geometry* geometry,
-                                      const SkStrokeRec& style,
+                                      SkStrokeRec* style,
                                       ClipStack::ElementList* outEffectiveElements) const {
     static const Clip kClippedOut = {
             Rect::InfiniteInverted(), Rect::InfiniteInverted(), SkIRect::MakeEmpty(),
@@ -1838,7 +1764,7 @@ Clip ClipStack::visitClipStackForDraw(const Transform& localToDevice,
     const Rect deviceBounds = this->deviceBounds();
 
     DrawShape draw{localToDevice, *geometry};
-    if (!draw.applyStyle(style, deviceBounds)) {
+    if (!draw.applyStyle(*style, deviceBounds)) {
         return kClippedOut;
     }
 
@@ -1861,7 +1787,7 @@ Clip ClipStack::visitClipStackForDraw(const Transform& localToDevice,
         case DrawInfluence::kNone:
             // The draw is unaffected by the clip stack (except possibly `scissor`), and there's no
             // need to visit each clip element.
-            return draw.toClip(geometry, {}, cs.shader());
+            return draw.toClip(geometry, style, {}, cs.shader());
 
         case DrawInfluence::kReplacesDraw:
             // The draw covers the clip entirely. Replace the shape with a flood fill, which can
@@ -1968,7 +1894,17 @@ Clip ClipStack::visitClipStackForDraw(const Transform& localToDevice,
         }
     }
 
-    return draw.toClip(geometry, nonMSAAClip, cs.shader());
+    return draw.toClip(geometry, style, nonMSAAClip, cs.shader());
+}
+
+int ClipStack::CountPendingElementDraws(SkSpan<const Element* const> elements) {
+    int undrawnCount = 0;
+    for (const Element* e : elements) {
+        if (!static_cast<const RawElement*>(e)->hasPendingDraw()) {
+            ++undrawnCount;
+        }
+    }
+    return undrawnCount;
 }
 
 std::pair<CompressedPaintersOrder, Layer*> ClipStack::updateClipStateForDraw(

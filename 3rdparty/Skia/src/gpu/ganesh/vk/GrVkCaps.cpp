@@ -520,6 +520,14 @@ void GrVkCaps::applyDriverCorrectnessWorkarounds(const GrContextOptions& context
         fShouldAlwaysUseDedicatedImageMemory = true;
     }
 
+    const skgpu::DriverVersion driverVersion = skgpu::ParseVulkanDriverVersion(
+            VK_DRIVER_ID_ARM_PROPRIETARY, properties.driverVersion);
+    if (skgpu::kARM_VkVendor == properties.vendorID &&
+        driverVersion >= skgpu::DriverVersion(42, 0) &&
+        driverVersion < skgpu::DriverVersion(56, 0)) {
+        fSleepAfterLostDeviceWait = true;
+    }
+
     // On Mali galaxy s7 and s9 we see lots of rendering issues with image filters dropping out when
     // using only primary command buffers. We also see issues on the P30 running android 28.
     if (skgpu::kARM_VkVendor == properties.vendorID && androidAPIVersion <= 28) {
@@ -579,6 +587,12 @@ void GrVkCaps::applyDriverCorrectnessWorkarounds(const GrContextOptions& context
     if (properties.vendorID == skgpu::kGoogle_VkVendor &&
         properties.deviceID == kSwiftshader_DeviceID) {
         fReuseScratchBuffers = false;
+    }
+
+    // On Imagination (PowerVR) drivers, when vkAllocateDescriptorSets fails with host or device
+    // OOM, the descriptor pool cannot be destroyed safely (crbug.com/549311485).
+    if (properties.vendorID == skgpu::kImagination_VkVendor) {
+        fMustLeakDescriptorPoolOnError = true;
     }
 
     ////////////////////////////////////////////////////////////////////////////

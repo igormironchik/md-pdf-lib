@@ -555,7 +555,14 @@ void GrGLCaps::init(const GrContextOptions& contextOptions,
                                     kNoFormatConversion_BlitFramebufferFlag |
                                     kRectsMustMatchForMSAASrc_BlitFramebufferFlag;
         }
-    } // No WebGL 1.0 support for BlitFramebuffer
+    } else if (GR_IS_GR_WEBGL(standard)) {
+        if (version >= GR_GL_VER(2, 0)) {
+            // WebGL 2.0 inherits same blit limitations as GLES 3.0.
+            fBlitFramebufferFlags = kNoFormatConversionForMSAASrc_BlitFramebufferFlag |
+                                    kNoMSAADst_BlitFramebufferFlag |
+                                    kRectsMustMatchForMSAASrc_BlitFramebufferFlag;
+        } // No WebGL 1.0 support for BlitFramebuffer
+    }
 
     this->initBlendEqationSupport(ctxInfo);
 
@@ -737,7 +744,7 @@ void GrGLCaps::init(const GrContextOptions& contextOptions,
     if (GR_IS_GR_GL(standard)) {
         fBaseVertexBaseInstanceSupport = version >= GR_GL_VER(4,2) ||
                                          ctxInfo.hasExtension("GL_ARB_base_instance");
-        if (fBaseVertexBaseInstanceSupport) {
+        if (fBaseVertexBaseInstanceSupport && !fPreferClientSideDynamicBuffers) {
             fNativeDrawIndirectSupport = version >= GR_GL_VER(4,0) ||
                                          ctxInfo.hasExtension("GL_ARB_draw_indirect");
             if (version >= GR_GL_VER(4,3) || ctxInfo.hasExtension("GL_ARB_multi_draw_indirect")) {
@@ -881,6 +888,12 @@ void GrGLCaps::init(const GrContextOptions& contextOptions,
         fShouldCollapseSrcOverToSrcWhenAble = true;
     }
 
+    if (ctxInfo.vendor() == GrGLVendor::kQualcomm) {
+        // It appears that all the Adreno GPUs have less than optimal performance (and allocate
+        // O(N^2) client-side VBO memory up to maxIndexValue) when drawing w/ large index buffers.
+        fAvoidLargeIndexBufferDraws = true;
+    }
+
 #ifdef SK_BUILD_FOR_ANDROID_FRAMEWORK
     if (ctxInfo.renderer() == GrGLRenderer::kPowerVRRogue) {
         // https://b/195281495
@@ -908,6 +921,10 @@ void GrGLCaps::init(const GrContextOptions& contextOptions,
 
     // For now these two are equivalent but we could have dst read in shader via some other method.
     shaderCaps->fDstReadInShaderSupport = shaderCaps->fFBFetchSupport;
+
+    SkASSERT(fMSAAResolvesAutomatically ==
+             (fMSFBOType == kES_EXT_MsToTexture_MSFBOType ||
+              fMSFBOType == kES_IMG_MsToTexture_MSFBOType));
 }
 
 const char* get_glsl_version_decl_string(GrGLStandard standard, SkSL::GLSLGeneration generation,
@@ -4166,6 +4183,16 @@ void GrGLCaps::applyDriverCorrectnessWorkarounds(const GrGLContextInfo& ctxInfo,
 
     // https://skbug.com/503013389
     if (ctxInfo.driver() == GrGLDriver::kNVIDIA) {
+        if (fMSFBOType == kES_EXT_MsToTexture_MSFBOType ||
+            fMSFBOType == kES_IMG_MsToTexture_MSFBOType) {
+            if (ctxInfo.version() >= GR_GL_VER(3, 0) ||
+                ctxInfo.hasExtension("GL_CHROMIUM_framebuffer_multisample") ||
+                ctxInfo.hasExtension("GL_ANGLE_framebuffer_multisample")) {
+                fMSFBOType = kStandard_MSFBOType;
+            } else {
+                fMSFBOType = kNone_MSFBOType;
+            }
+        }
         fMSAAResolvesAutomatically = false;
     }
 
@@ -4231,12 +4258,6 @@ void GrGLCaps::applyDriverCorrectnessWorkarounds(const GrGLContextInfo& ctxInfo,
     if (fDriverBugWorkarounds.gl_clear_broken) {
         fPerformColorClearsAsDraws = true;
         fPerformStencilClearsAsDraws = true;
-    }
-
-    if (ctxInfo.vendor() == GrGLVendor::kQualcomm) {
-        // It appears that all the Adreno GPUs have less than optimal performance when
-        // drawing w/ large index buffers.
-        fAvoidLargeIndexBufferDraws = true;
     }
 
     if (ctxInfo.renderer() == GrGLRenderer::kMali4xx ||
@@ -4757,6 +4778,7 @@ void GrGLCaps::applyDriverCorrectnessWorkarounds(const GrGLContextInfo& ctxInfo,
             }
         } else {
             fMSFBOType = kNone_MSFBOType;
+            fMSAAResolvesAutomatically = false;
         }
     }
 

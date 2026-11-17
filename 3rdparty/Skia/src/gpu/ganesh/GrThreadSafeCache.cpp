@@ -12,6 +12,7 @@
 #include "include/gpu/GpuTypes.h"
 #include "include/gpu/ganesh/GrDirectContext.h"
 #include "include/gpu/ganesh/GrTypes.h"
+#include "include/private/SkMalloc.h"
 #include "include/private/SkTo.h"
 #include "include/private/gpu/ganesh/GrTypesPriv.h"
 #include "src/gpu/GpuTypesPriv.h"
@@ -32,13 +33,58 @@ class GrResourceProvider;
 class SkData;
 enum class SkBackingFit;
 
+GrThreadSafeCache::VertexData::VertexData(sk_sp<GrGpuBuffer> gpuBuffer,
+                                          int numVertices,
+                                          size_t vertexSize)
+        : fNumVertices(numVertices)
+        , fVertexSize(vertexSize)
+        , fGpuBuffer(std::move(gpuBuffer)) {
+    if (fGpuBuffer) {
+        if (GrDirectContext* dContext = fGpuBuffer->getContext()) {
+            fGpuBufferContextID = dContext->directContextID();
+        }
+    }
+}
+
 GrThreadSafeCache::VertexData::~VertexData () {
     this->reset();
 }
 
-GrThreadSafeCache::GrThreadSafeCache()
-    : fFreeEntryList(nullptr) {
+void GrThreadSafeCache::VertexData::setGpuBuffer(sk_sp<GrGpuBuffer> gpuBuffer) {
+    // TODO: once we add the gpuBuffer we could free 'fVertices'. Deinstantiable
+    // DDLs could throw a monkey wrench into that plan though.
+    SkASSERT(!fGpuBuffer);
+    if (gpuBuffer) {
+        if (GrDirectContext* dContext = gpuBuffer->getContext()) {
+            fGpuBufferContextID = dContext->directContextID();
+        }
+    }
+    fGpuBuffer = std::move(gpuBuffer);
 }
+
+void GrThreadSafeCache::VertexData::reset() {
+    sk_free(const_cast<void*>(fVertices.get()));
+    fVertices = nullptr;
+    fNumVertices = 0;
+    fVertexSize = 0;
+    if (fGpuBuffer) {
+        // The last reference to a VertexData can be dropped on a DDL recording thread (e.g. when
+        // TriangulatingPathOp::onPrePrepareDraws replaces a coarser incumbent in the cache). A
+        // GrGpuResource's final unref runs GrResourceCache::notifyARefCntReachedZero() /
+        // release() / delete synchronously on the calling thread, and GrResourceCache is only
+        // safe to use on the GrDirectContext's thread. Hand the buffer back to the owning
+        // context instead; its cache unrefs it on the context thread (or drops it if the
+        // context is already gone).
+        if (fGpuBufferContextID.isValid()) {
+            GrResourceCache::ReturnResourceFromThread(std::move(fGpuBuffer), fGpuBufferContextID);
+            fGpuBufferContextID = GrDirectContext::DirectContextID();
+        }
+        // Either moved-from above or already destroyed (no cache interaction on unref).
+        fGpuBuffer.reset();
+    }
+}
+
+GrThreadSafeCache::GrThreadSafeCache() {}
 
 GrThreadSafeCache::~GrThreadSafeCache() {
     this->dropAllRefs();

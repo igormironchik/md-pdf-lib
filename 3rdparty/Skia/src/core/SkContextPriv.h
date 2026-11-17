@@ -11,7 +11,7 @@
 #include "include/core/SkContext.h"
 #include "include/core/SkRefCnt.h"
 #include "include/private/SkGPUContext.h"
-#include "src/core/SkSharedContext.h"
+#include "src/core/SkSharedState.h"
 
 #include <memory>
 
@@ -22,12 +22,10 @@ class SkContext;
     data members or virtual methods.*/
 class SkContextPrivConst {
 public:
-    SkStrikeCache* strikeCache() const { return fConstContext->strikeCache(); }
+    const SkSharedState* sharedState() const { return fConstContext->fSharedState.get(); }
 
 protected:
     explicit SkContextPrivConst(const SkContext* context) : fConstContext(context) {}
-
-    size_t fontCacheLimit() const { return fConstContext->fontCacheLimit(); }
 
 private:
     // No taking addresses of this type.
@@ -44,7 +42,7 @@ private:
    additional data members or virtual methods.*/
 class SkContextPriv : public SkContextPrivConst {
 public:
-    SkSharedContext* sharedContext() { return fContext->fSharedContext.get(); }
+    SkSharedState* sharedState() { return fContext->fSharedState.get(); }
 
 private:
     friend class SkContext;
@@ -70,14 +68,15 @@ public:
     // Ganesh and Graphite
     static std::unique_ptr<SkContext> MakeContext(const SkContextOptions& options,
                                                   std::unique_ptr<SkGPUContext> gpuContext);
-
 };
 
 namespace SkContexts {
 // Returns the global SkContext. If the global SkContext does not exist yet, it will be created.
 // This is an intermediary step in the SkContext project, whereby we use this
 // global SkContext object to remove or take away functionality from SkGraphics.
-SkContext* GetGlobalSkContext();
+// NOTE: set enableRuntimeOpts to false by default so that if we create the global skcontext from
+// the skgraphics::set__ functions, then it won't init the runtime opts
+SkContext* GetGlobalSkContext(bool enableRuntimeOpts = false);
 }
 
 #endif  // SkContextPriv_DEFINED

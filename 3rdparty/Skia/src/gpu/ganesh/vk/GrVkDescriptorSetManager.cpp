@@ -235,6 +235,8 @@ GrVkDescriptorSetManager::GrVkDescriptorSetManager(
     }
 }
 
+GrVkDescriptorSetManager::~GrVkDescriptorSetManager() = default;
+
 const GrVkDescriptorSet* GrVkDescriptorSetManager::getDescriptorSet(GrVkGpu* gpu,
                                                                     const Handle& handle) {
     const GrVkDescriptorSet* ds = nullptr;
@@ -315,23 +317,26 @@ GrVkDescriptorSetManager::DescriptorPoolManager::DescriptorPoolManager(
     , fDescType(type)
     , fDescCountPerSet(descCountPerSet)
     , fMaxDescriptors(kStartNumDescriptors)
-    , fCurrentDescriptorCount(0)
-    , fPool(nullptr) {
+    , fCurrentDescriptorCount(0) {
+}
+
+GrVkDescriptorSetManager::DescriptorPoolManager::~DescriptorPoolManager() {
+    SkASSERT(!fDescLayout);
+    SkASSERT(!fPool);
 }
 
 bool GrVkDescriptorSetManager::DescriptorPoolManager::getNewPool(GrVkGpu* gpu) {
     if (fPool) {
-        fPool->unref();
+        fPool.reset();
         uint32_t newPoolSize = fMaxDescriptors + ((fMaxDescriptors + 1) >> 1);
         if (newPoolSize < kMaxDescriptors) {
             fMaxDescriptors = newPoolSize;
         } else {
             fMaxDescriptors = kMaxDescriptors;
         }
-
     }
-    fPool = gpu->resourceProvider().findOrCreateCompatibleDescriptorPool(fDescType,
-                                                                         fMaxDescriptors);
+    fPool.reset(gpu->resourceProvider().findOrCreateCompatibleDescriptorPool(fDescType,
+                                                                             fMaxDescriptors));
     return SkToBool(fPool);
 }
 
@@ -359,7 +364,15 @@ bool GrVkDescriptorSetManager::DescriptorPoolManager::getNewDescriptorSet(GrVkGp
     GR_VK_CALL_RESULT(gpu, result, AllocateDescriptorSets(gpu->device(),
                                                           &dsAllocateInfo,
                                                           ds));
-    return result == VK_SUCCESS;
+    if (result != VK_SUCCESS) {
+        if (gpu->vkCaps().mustLeakDescriptorPoolOnError() &&
+            (result == VK_ERROR_OUT_OF_HOST_MEMORY || result == VK_ERROR_OUT_OF_DEVICE_MEMORY)) {
+            fPool->markLeaked();
+            fPool.reset();
+        }
+        return false;
+    }
+    return true;
 }
 
 void GrVkDescriptorSetManager::DescriptorPoolManager::freeGPUResources(GrVkGpu* gpu) {
@@ -369,9 +382,6 @@ void GrVkDescriptorSetManager::DescriptorPoolManager::freeGPUResources(GrVkGpu* 
         fDescLayout = VK_NULL_HANDLE;
     }
 
-    if (fPool) {
-        fPool->unref();
-        fPool = nullptr;
-    }
+    fPool.reset();
 }
 

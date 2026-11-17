@@ -1,4 +1,5 @@
 rm -rf 3rdparty/Skia/agents
+rm -rf 3rdparty/Skia/_agents
 rm -rf 3rdparty/Skia/bazel
 rm -rf 3rdparty/Skia/bench
 rm -rf 3rdparty/Skia/build_overrides
@@ -63,7 +64,6 @@ rm -rf 3rdparty/Skia/third_party/externals/partition_alloc
 rm -rf 3rdparty/Skia/third_party/externals/perfetto
 rm -rf 3rdparty/Skia/third_party/externals/spirv-cross
 rm -rf 3rdparty/Skia/third_party/externals/spirv-headers
-rm -rf 3rdparty/Skia/third_party/externals/spirv-tools
 rm -rf 3rdparty/Skia/third_party/externals/swiftshader
 rm -rf 3rdparty/Skia/third_party/externals/unicodetools
 rm -rf 3rdparty/Skia/third_party/externals/vello
@@ -81,3 +81,4 @@ rm -rf 3rdparty/Skia/third_party/externals/icu/source/data
 rm -rf 3rdparty/Skia/third_party/externals/icu/source/test
 rm -rf 3rdparty/Skia/tools
 rm -rf 3rdparty/Skia/tests
+find 3rdparty/Skia -type d -name ".git" -exec rm -rf {} +

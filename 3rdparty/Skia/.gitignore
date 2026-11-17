@@ -18,6 +18,8 @@
 .vs/
 .win_toolchain/
 TAGS
+_agents/chromium-internal/
+_agents/chromium-shared/
 agents/internal/
 agents/shared/
 bower_components
@@ -45,7 +47,6 @@ tools/skp/page_sets/data/*.json
 tools/skp/page_sets/data/*.wpr
 
 buildtools
-third_party/externals
 
 bin/gn
 bin/gn.exe
