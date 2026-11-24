@@ -13,6 +13,23 @@ namespace MdPdf
 {
 
 //
+// WebPage
+//
+
+//! Web page.
+class WebPage : public QWebEnginePage
+{
+public:
+    explicit WebPage(QObject *parent);
+    ~WebPage() override = default;
+
+protected:
+    bool acceptNavigationRequest(const QUrl &url,
+                                 NavigationType type,
+                                 bool isMainFrame) override;
+}; // class WebPage
+
+//
 // Diagram
 //
 
@@ -44,7 +61,7 @@ private Q_SLOTS:
 private:
     Q_DISABLE_COPY(Diagram)
 
-    QWebEnginePage *m_page = nullptr;
+    WebPage *m_page = nullptr;
     bool m_loaded = false;
     QString m_fontName;
     QString m_monoFontName;

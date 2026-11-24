@@ -22,6 +22,7 @@
 #include <QSignalSpy>
 #include <QTest>
 #include <QVector>
+#include <QWebEngineUrlScheme>
 
 //! Prepare test data or do actual test?
 static const bool s_printData = false;
@@ -593,6 +594,16 @@ void TestRender::testMermaid()
 {
     doTest(QStringLiteral("mermaid.md"), QString(), 8.0, 8.0, MdPdf::ImageAlignment::Center, false);
 }
+
+static void registerCustomSchemes()
+{
+    QWebEngineUrlScheme qrc("qrc");
+    qrc.setFlags(QWebEngineUrlScheme::CorsEnabled | QWebEngineUrlScheme::FetchApiAllowed);
+    qrc.setSyntax(QWebEngineUrlScheme::Syntax::Path);
+    QWebEngineUrlScheme::registerScheme(qrc);
+}
+
+Q_CONSTRUCTOR_FUNCTION(registerCustomSchemes)
 
 QTEST_MAIN(TestRender)
 

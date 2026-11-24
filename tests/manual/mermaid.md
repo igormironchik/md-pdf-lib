@@ -1124,3 +1124,13 @@ Custom App -> Off-the-shelf Tool
 Custom App -> Managed Service
 Off-the-shelf Tool -> Cloud Platform
 ```
+
+```mmd
+sequenceDiagram
+    participant Client as Клиент
+    participant Server as Сервер
+
+    Client->>Server: Передача открытого ключа $$A = g^a \bmod p$$
+    Server-->>Client: Ответ сервера $$B = g^b \bmod p$$
+    Note over Client,Server: Общий секрет: $$K = B^a \bmod p = A^b \bmod p$$
+```

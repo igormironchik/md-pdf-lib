@@ -10,9 +10,31 @@
 #include <QEventLoop>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QWebEngineSettings>
 
 namespace MdPdf
 {
+
+//
+// WebPage
+//
+
+WebPage::WebPage(QObject *parent)
+    : QWebEnginePage(parent)
+{
+    settings()->setAttribute(QWebEngineSettings::LocalContentCanAccessRemoteUrls, true);
+}
+
+bool WebPage::acceptNavigationRequest(const QUrl &url,
+                                          QWebEnginePage::NavigationType /*type*/,
+                                          bool /*isMainFrame*/)
+{
+    if (url.scheme() == QStringLiteral("qrc") || url.scheme() == QStringLiteral("data")) {
+        return true;
+    }
+
+    return false;
+}
 
 //
 // Diagram
@@ -24,7 +46,7 @@ Diagram::Diagram(const QString &fontName,
                  QObject *parent,
                  bool async)
     : QObject(parent)
-    , m_page(new QWebEnginePage(this))
+    , m_page(new WebPage(this))
     , m_fontName(fontName)
     , m_monoFontName(monoFontName)
     , m_fontSize(fontSize)

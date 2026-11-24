@@ -2,13 +2,41 @@
 <meta charset="utf-8">
 <head>
     <script src="qrc:/js/pele.global.js"></script>
+    <script>
+        window.MathJax = {
+            loader: { load: ['ui/safe'] },
+            svg: { fontCache: 'none' },
+        };
+    </script>
+    <script defer src="qrc:/js/MathJax/tex-svg.js"></script>
 </head>
 <body>
     <script>
+        function math(tex, size) {
+            let svg;
+
+            try {
+                svg = MathJax.tex2svg(tex, { display: true }).querySelector('svg');
+            } catch {
+                return null;
+            }
+
+            if (!svg || svg.querySelector('[data-mjx-error]')) return null;
+
+            const width = (parseFloat(svg.getAttribute('width')) * size) / 2;
+            const height = (parseFloat(svg.getAttribute('height')) * size) / 2;
+            svg.setAttribute('width', String(width));
+            svg.setAttribute('height', String(height));
+            svg.removeAttribute('style');
+
+            return { svg: svg.outerHTML, width, height };
+        }
+
         window.renderMermaid = function(code, fontFamily, fontFamilyMono, fontSize) {
             try {
                 const options = {};
                 options.fontSize = fontSize;
+                options.math = math;
 
                 if (fontFamily) options.fontFamily = fontFamily;
                 if (fontFamilyMono) options.fontFamilyMono = fontFamilyMono;
@@ -16,7 +44,7 @@
                 const { svg } = pele.render(code, options);
 
                 return svg;
-            } catch (e) {
+            } catch {
                 return "";
             }
         };

@@ -3866,6 +3866,12 @@ PdfRenderer::drawImage(PdfAuxData &pdfData,
                 imgData = img;
             }
 
+            static int i = 0;
+            QFile f(QString("%1.svg").arg(++i));
+            f.open(QIODevice::WriteOnly);
+            f.write(imgData);
+            f.close();
+
             auto data = SkData::MakeWithoutCopy(imgData.data(), imgData.size());
             auto stream = SkMemoryStream::Make(data);
             auto builder = SkSVGDOM::Builder();
