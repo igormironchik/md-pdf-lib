@@ -38,7 +38,7 @@ endif()
 
 add_compile_definitions(QT_NO_KEYWORDS)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Network)
+find_package(Qt6 REQUIRED COMPONENTS Core Network WebEngineCore Xml)
 
 find_package(ZLIB REQUIRED)
 

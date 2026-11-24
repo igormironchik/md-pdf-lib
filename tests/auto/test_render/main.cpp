@@ -122,6 +122,9 @@ private Q_SLOTS:
     void testSuperSubScript();
     //! Test super- and subscript.
     void testSuperSubScriptBigFont();
+
+    //! Test diagrams.
+    void testMermaid();
 }; // class TestRender
 
 namespace MdPdf
@@ -584,6 +587,11 @@ void TestRender::testEmojiBigFont()
            14.0,
            MdPdf::ImageAlignment::Center,
            true);
+}
+
+void TestRender::testMermaid()
+{
+    doTest(QStringLiteral("mermaid.md"), QString(), 8.0, 8.0, MdPdf::ImageAlignment::Center, false);
 }
 
 QTEST_MAIN(TestRender)

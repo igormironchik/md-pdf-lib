@@ -5,6 +5,9 @@
 
 #pragma once
 
+// md-pdf-lib library.
+#include "diagram.h"
+
 // Qt include.
 #include <QByteArray>
 #include <QColor>
@@ -379,6 +382,8 @@ struct PdfAuxData {
     long long int m_endLine = 0;
     //! End position in the end line.
     long long int m_endPos = 0;
+    //! Diagram render.
+    Diagram *m_diagram = nullptr;
     //! Anchors in document.
     QStringList m_anchors;
     //! Reserved spaces on the pages for footnotes.

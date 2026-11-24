@@ -6,5 +6,7 @@
         <file>svg/note.svg</file>
         <file>svg/tip.svg</file>
         <file>svg/warning.svg</file>
+        <file>js/pele.global.js</file>
+        <file>js/index.html</file>
     </qresource>
 </RCC>

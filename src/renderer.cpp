@@ -49,6 +49,8 @@
 
 // Qt include.
 #include <QBuffer>
+#include <QDir>
+#include <QDomDocument>
 #include <QScopedValueRollback>
 #include <QThread>
 
@@ -59,6 +61,7 @@ namespace MdPdf
 {
 
 static const QString s_spaceString = QStringLiteral(" ");
+static const int s_mermaidImage = 1000;
 
 //
 // PdfRendererError
@@ -166,6 +169,8 @@ void PdfRenderer::renderImpl()
         pdfData.m_layout.margins().m_right = m_opts.m_right;
         pdfData.m_layout.margins().m_top = m_opts.m_top;
         pdfData.m_layout.margins().m_bottom = m_opts.m_bottom;
+
+        pdfData.m_diagram = new Diagram(m_opts.m_textFont, m_opts.m_codeFont, 16, this);
 
         pdfData.m_colorsStack.push(Qt::black);
 
@@ -508,6 +513,10 @@ void PdfRenderer::renderImpl()
         handleException(pdfData, QString::fromLatin1("Error during drawing PDF: %1").arg(e.what()));
     } catch (...) {
         handleException(pdfData, QStringLiteral("Error during drawing PDF."));
+    }
+
+    if (pdfData.m_diagram) {
+        pdfData.m_diagram->deleteLater();
     }
 
     deleteLater();
@@ -3660,6 +3669,121 @@ ParagraphAlignment imageToParagraphAlignment(ImageAlignment alignment)
     }
 }
 
+void replaceVarsInNode(QDomNode node,
+                       const QMap<QString,
+                                  QString> &vars)
+{
+    while (!node.isNull()) {
+        if (node.isElement()) {
+            QDomElement elem = node.toElement();
+            QDomNamedNodeMap attrs = elem.attributes();
+
+            for (int i = 0; i < attrs.count(); ++i) {
+                QDomAttr attr = attrs.item(i).toAttr();
+                const auto val = attr.value();
+
+                if (vars.contains(val)) {
+                    attr.setValue(vars[val]);
+                }
+            }
+        }
+
+        if (node.hasChildNodes()) {
+            replaceVarsInNode(node.firstChild(), vars);
+        }
+
+        node = node.nextSibling();
+    }
+}
+
+void prepareStyle(QDomElement &elem,
+                  const QMap<QString,
+                             QString> &vars,
+                  int fontSize)
+{
+    elem.setAttribute(QStringLiteral("font-family"), vars[QStringLiteral("font")]);
+    elem.setAttribute(QStringLiteral("font-size"), fontSize);
+    elem.setAttribute(QStringLiteral("rx"), vars[QLatin1String("radius")]);
+}
+
+QByteArray prepareSvg(const QByteArray &a,
+                      const RenderOpts &opts,
+                      int fontSize)
+{
+    QDomDocument doc;
+
+    if (!doc.setContent(a)) {
+        return a;
+    }
+
+    QDomElement docElem = doc.documentElement();
+
+    QMap<QString, QString> vars;
+
+    const auto &theme = opts.m_syntax->theme();
+
+    auto addVar = [&vars](QLatin1String name, const QString &value, const QLatin1String &shortName = QLatin1String()) {
+        vars.insert(QStringLiteral("var(--pele-") + name + QStringLiteral(")"), value);
+        vars.insert(QStringLiteral("--pele-") + name, value);
+        vars.insert(name, value);
+
+        if (!shortName.isEmpty()) {
+            vars.insert(QStringLiteral("var(--_") + shortName + QStringLiteral(")"), value);
+            vars.insert(QStringLiteral("--_") + shortName, value);
+        }
+    };
+
+    auto edColor = [&theme](KSyntaxHighlighting::Theme::EditorColorRole role) {
+        return QColor(theme.editorColor(role)).name();
+    };
+
+    auto textColor = [&theme](KSyntaxHighlighting::Theme::TextStyle style) {
+        return QColor(theme.textColor(style)).name();
+    };
+
+    const QString bgColor = edColor(KSyntaxHighlighting::Theme::BackgroundColor);
+    addVar(QLatin1String("bg"), bgColor, QLatin1String("bg"));
+    addVar(QLatin1String("surface"), edColor(KSyntaxHighlighting::Theme::CodeFolding), QLatin1String("s"));
+    addVar(QLatin1String("surface-alt"), edColor(KSyntaxHighlighting::Theme::CurrentLine), QLatin1String("a"));
+
+    const QString fgColor = textColor(KSyntaxHighlighting::Theme::Normal);
+    addVar(QLatin1String("fg"), fgColor, QLatin1String("fg"));
+    addVar(QLatin1String("muted"), textColor(KSyntaxHighlighting::Theme::Comment));
+
+    const bool isDarkTheme = QColor(bgColor).lightness() < 128;
+    addVar(QLatin1String("fg-on-light"), isDarkTheme ? bgColor : fgColor);
+    addVar(QLatin1String("fg-on-dark"), isDarkTheme ? fgColor : bgColor);
+
+    addVar(QLatin1String("line"), textColor(KSyntaxHighlighting::Theme::Operator), QLatin1String("l"));
+    addVar(QLatin1String("border"), edColor(KSyntaxHighlighting::Theme::Separator), QLatin1String("b"));
+    addVar(QLatin1String("accent"), edColor(KSyntaxHighlighting::Theme::TextSelection), QLatin1String("c"));
+    addVar(QLatin1String("critical"), textColor(KSyntaxHighlighting::Theme::Alert));
+    addVar(QLatin1String("error"), textColor(KSyntaxHighlighting::Theme::Error));
+
+    addVar(QLatin1String("font"), opts.m_textFont);
+    addVar(QLatin1String("font-mono"), opts.m_codeFont, QLatin1String("fm"));
+    addVar(QLatin1String("title-weight"), QStringLiteral("bold"));
+    addVar(QLatin1String("heading-weight"), QStringLiteral("bold"));
+    addVar(QLatin1String("bold-weight"), QStringLiteral("bold"));
+    addVar(QLatin1String("radius"), QStringLiteral("4px"), QLatin1String("r"));
+
+    addVar(QLatin1String("series-1"), textColor(KSyntaxHighlighting::Theme::Keyword));
+    addVar(QLatin1String("series-2"), textColor(KSyntaxHighlighting::Theme::String));
+    addVar(QLatin1String("series-3"), textColor(KSyntaxHighlighting::Theme::Function));
+    addVar(QLatin1String("series-4"), textColor(KSyntaxHighlighting::Theme::DataType));
+    addVar(QLatin1String("series-5"), textColor(KSyntaxHighlighting::Theme::Constant));
+    addVar(QLatin1String("series-6"), textColor(KSyntaxHighlighting::Theme::Variable));
+    addVar(QLatin1String("series-7"), textColor(KSyntaxHighlighting::Theme::SpecialChar));
+    addVar(QLatin1String("series-8"), textColor(KSyntaxHighlighting::Theme::Attribute));
+
+    docElem.setAttribute(QStringLiteral("style"), QString());
+    prepareStyle(docElem, vars, fontSize);
+
+    replaceVarsInNode(docElem, vars);
+
+    return doc.toByteArray();
+}
+
 QPair<RectF,
       unsigned int>
 PdfRenderer::drawImage(PdfAuxData &pdfData,
@@ -3734,7 +3858,15 @@ PdfRenderer::drawImage(PdfAuxData &pdfData,
                                   imgScale / dpiScale);
             };
         } else {
-            auto data = SkData::MakeWithoutCopy(img.data(), img.size());
+            QByteArray imgData;
+
+            if (item->opts() == s_mermaidImage) {
+                imgData = prepareSvg(img, m_opts, pdfData.m_diagram->fontSize());
+            } else {
+                imgData = img;
+            }
+
+            auto data = SkData::MakeWithoutCopy(imgData.data(), imgData.size());
             auto stream = SkMemoryStream::Make(data);
             auto builder = SkSVGDOM::Builder();
             builder.setFontManager(pdfData.m_fontMgr);
@@ -4060,7 +4192,49 @@ PdfRenderer::drawCode(PdfAuxData &pdfData,
                       CalcHeightOpt heightCalcOpt,
                       double scale)
 {
-    Q_UNUSED(doc)
+    if (item->syntax().toLower() == QStringLiteral("mermaid") || item->syntax().toLower() == QStringLiteral("mmd")) {
+        disconnect(pdfData.m_diagram, &Diagram::finished, this, 0);
+
+        auto drawn = false;
+        QPair<QVector<WhereDrawn>, WhereDrawn> whereDrawn;
+
+        connect(pdfData.m_diagram, &Diagram::finished, this, [&](const QString &svg) {
+            if (!svg.isEmpty()) {
+                QTemporaryFile tmp(QDir::tempPath() + QDir::separator() + QStringLiteral("XXXXXXXXX.svg"));
+
+                if (tmp.open()) {
+                    tmp.write(svg.toUtf8());
+                    tmp.close();
+
+                    MD::Paragraph p;
+                    p.setStartColumn(item->startColumn());
+                    p.setStartLine(item->startLine());
+                    p.setEndColumn(item->endColumn());
+                    p.setEndLine(item->endLine());
+
+                    auto img = QSharedPointer<MD::Image>::create();
+                    img->setOpts(s_mermaidImage);
+                    img->setUrl(tmp.fileName());
+                    img->setStartColumn(item->startColumn());
+                    img->setStartLine(item->startLine());
+                    img->setEndColumn(item->endColumn());
+                    img->setEndLine(item->endLine());
+
+                    p.appendItem(img);
+
+                    drawn = true;
+
+                    whereDrawn = drawParagraph(pdfData, &p, doc, offset, true, heightCalcOpt, scale);
+                }
+            }
+        });
+
+        Q_EMIT pdfData.m_diagram->convert(item->text());
+
+        if (drawn) {
+            return whereDrawn;
+        }
+    }
 
     const auto wasRightToLeft = pdfData.m_layout.isRightToLeft();
     const auto autoOffset = pdfData.m_layout.addOffset(offset, !wasRightToLeft);
