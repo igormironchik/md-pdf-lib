@@ -61,7 +61,7 @@ namespace MdPdf
 {
 
 static const QString s_spaceString = QStringLiteral(" ");
-static const int s_mermaidImage = 1000;
+static const int s_mermaidImage = 1 << 10;
 
 //
 // PdfRendererError
