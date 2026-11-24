@@ -5,35 +5,9 @@
 </head>
 <body>
     <script>
-        function createTextMeasurer(fontFamily, fontFamilyMono) {
-            const canvas = document.createElement("canvas");
-            const ctx = canvas.getContext("2d");
-
-            const regularFont = fontFamily || "sans-serif";
-            const monoFont = fontFamilyMono || "monospace";
-
-            return {
-                width(text, size, style) {
-                    if (!text) return 0;
-
-                    const isBold = (style & 1) !== 0;
-                    const isItalic = (style & 2) !== 0;
-                    const isMono = (style & 4) !== 0;
-
-                    const fontStyle = isItalic ? "italic" : "normal";
-                    const fontWeight = isBold ? "bold" : "normal";
-                    const family = isMono ? monoFont : regularFont;
-
-                    ctx.font = `${fontStyle} ${fontWeight} ${size}px ${family}`;
-                    return ctx.measureText(text).width;
-                }
-            };
-        }
-
         window.renderMermaid = function(code, fontFamily, fontFamilyMono, fontSize) {
             try {
                 const options = {};
-                options.measurer = createTextMeasurer(fontFamily, fontFamilyMono);
                 options.fontSize = fontSize;
 
                 if (fontFamily) options.fontFamily = fontFamily;
