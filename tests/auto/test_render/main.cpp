@@ -5,8 +5,8 @@
 
 // md-pdf-lib include.
 #include <const.h>
-#include <syntax.h>
 #include <renderer.h>
+#include <syntax.h>
 #include <utils.h>
 
 // md4qt include.
@@ -21,6 +21,7 @@
 #include <QObject>
 #include <QSignalSpy>
 #include <QTest>
+#include <QThread>
 #include <QVector>
 #include <QWebEngineUrlScheme>
 
@@ -38,6 +39,8 @@ class TestRender final : public QObject
 private Q_SLOTS:
     //! Init tests.
     void initTestCase();
+    //! Cleanup.
+    void cleanupTestCase();
     //! Test footnotes rendering.
     void testFootnotes();
     //! Test table with images.
@@ -126,6 +129,9 @@ private Q_SLOTS:
 
     //! Test diagrams.
     void testMermaid();
+
+private:
+    QThread *m_thread = nullptr;
 }; // class TestRender
 
 namespace MdPdf
@@ -142,13 +148,15 @@ inline double mmInPt(double mm)
 } /* namespace anonymous */
 
 struct TestRendering {
-    static void testRendering(const QString &fileName,
-                              const QString &suffix,
-                              const QVector<DrawPrimitive> &data,
-                              double textFontSize,
-                              double codeFontSize,
-                              ImageAlignment align = ImageAlignment::Center,
-                              bool withPlugins = false)
+    static QSharedPointer<Diagram> testRendering(QEventLoop *loop,
+                                                 QThread *thread,
+                                                 const QString &fileName,
+                                                 const QString &suffix,
+                                                 const QVector<DrawPrimitive> &data,
+                                                 double textFontSize,
+                                                 double codeFontSize,
+                                                 ImageAlignment align = ImageAlignment::Center,
+                                                 bool withPlugins = false)
     {
         MD::Parser parser;
 
@@ -189,14 +197,19 @@ struct TestRendering {
         auto diagram = QSharedPointer<Diagram>::create(opts.m_textFont, opts.m_codeFont, 16);
         opts.m_diagram = diagram.get();
 
-        PdfRenderer render;
+        PdfRenderer *render = new PdfRenderer;
+        render->moveToThread(thread);
 
-        render.render(QStringLiteral("./") + fileName + suffix + QStringLiteral(".pdf"), doc, opts);
-        render.renderImpl();
+        render->render(QStringLiteral("./") + fileName + suffix + QStringLiteral(".pdf"), doc, opts);
 
-        if (render.isError()) {
+        QObject::connect(render, &PdfRenderer::error, loop, [loop](const QString &) {
+            loop->quit();
+
             QFAIL("Rendering of Markdown failed. Test aborted.");
-        }
+        });
+        QObject::connect(render, &PdfRenderer::done, loop, &QEventLoop::quit);
+
+        return diagram;
     }
 
     static void testDescent()
@@ -362,7 +375,8 @@ QVector<DrawPrimitive> loadTestData(const QString &fileName,
 
 } /* namespace MdPdf */
 
-void doTest(const QString &fileName,
+void doTest(QThread *thread,
+            const QString &fileName,
             const QString &suffix,
             double textFontSize,
             double codeFontSize,
@@ -379,7 +393,19 @@ void doTest(const QString &fileName,
         }
     }
 
-    MdPdf::TestRendering::testRendering(fileName, suffix, data, textFontSize, codeFontSize, align, withPlugins);
+    QEventLoop loop;
+
+    auto diagram = MdPdf::TestRendering::testRendering(&loop,
+                                                       thread,
+                                                       fileName,
+                                                       suffix,
+                                                       data,
+                                                       textFontSize,
+                                                       codeFontSize,
+                                                       align,
+                                                       withPlugins);
+
+    loop.exec();
 }
 
 void TestRender::initTestCase()
@@ -396,166 +422,175 @@ void TestRender::initTestCase()
     tex::LaTeX::init(":/res");
 
     MdPdf::initSharedResources();
+
+    m_thread = new QThread(this);
+    m_thread->start();
+}
+
+void TestRender::cleanupTestCase()
+{
+    m_thread->quit();
+    m_thread->wait();
 }
 
 void TestRender::testFootnotes()
 {
-    doTest(QStringLiteral("footnotes.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("footnotes.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testTableWithImage()
 {
-    doTest(QStringLiteral("table.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("table.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testTableWithText()
 {
-    doTest(QStringLiteral("table2.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("table2.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testBlockquote()
 {
-    doTest(QStringLiteral("blockquote.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("blockquote.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testComplex()
 {
-    doTest(QStringLiteral("complex.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("complex.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testImageInText()
 {
-    doTest(QStringLiteral("image_in_text.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("image_in_text.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testFootnoteWithTable()
 {
-    doTest(QStringLiteral("footnote2.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("footnote2.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testComplexFootnote()
 {
-    doTest(QStringLiteral("footnote3.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("footnote3.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testComplex3()
 {
-    doTest(QStringLiteral("complex3.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("complex3.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testFootnotesBigFont()
 {
-    doTest(QStringLiteral("footnotes.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("footnotes.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testTableWithImageBigFont()
 {
-    doTest(QStringLiteral("table.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("table.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testTableWithTextBigFont()
 {
-    doTest(QStringLiteral("table2.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("table2.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testBlockquoteBigFont()
 {
-    doTest(QStringLiteral("blockquote.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("blockquote.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testComplexBigFont()
 {
-    doTest(QStringLiteral("complex.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("complex.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testImageInTextBigFont()
 {
-    doTest(QStringLiteral("image_in_text.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("image_in_text.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testFootnoteWithTableBigFont()
 {
-    doTest(QStringLiteral("footnote2.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("footnote2.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testComplexFootnoteBigFont()
 {
-    doTest(QStringLiteral("footnote3.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("footnote3.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testComplex3BigFont()
 {
-    doTest(QStringLiteral("complex3.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("complex3.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testCode()
 {
-    doTest(QStringLiteral("code.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("code.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testComplex2()
 {
-    doTest(QStringLiteral("complex2.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("complex2.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testLinks()
 {
-    doTest(QStringLiteral("links.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("links.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testLinksBigFont()
 {
-    doTest(QStringLiteral("links.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("links.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testTaskList()
 {
-    doTest(QStringLiteral("tasklist.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("tasklist.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testTaskListBigFont()
 {
-    doTest(QStringLiteral("tasklist.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("tasklist.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testMath()
 {
-    doTest(QStringLiteral("math.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("math.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testMathBigFont()
 {
-    doTest(QStringLiteral("math.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("math.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testVeryLongFootnote()
 {
-    doTest(QStringLiteral("footnotes4.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("footnotes4.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testVeryLongFootnoteBigFont()
 {
-    doTest(QStringLiteral("footnotes4.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("footnotes4.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testImagesPlacing()
 {
-    doTest(QStringLiteral("images_placing.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("images_placing.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testBlockquoteHighlighting()
 {
-    doTest(QStringLiteral("highlighted_quotes.md"), QString(), 8.0, 8.0);
+    doTest(m_thread, QStringLiteral("highlighted_quotes.md"), QString(), 8.0, 8.0);
 }
 
 void TestRender::testBlockquoteHighlightingBig()
 {
-    doTest(QStringLiteral("highlighted_quotes.md"), QStringLiteral("_big"), 16.0, 14.0);
+    doTest(m_thread, QStringLiteral("highlighted_quotes.md"), QStringLiteral("_big"), 16.0, 14.0);
 }
 
 void TestRender::testPlacing()
 {
-    doTest(QStringLiteral("different_placing_cases.md"), QString(), 8.0, 8.0, MdPdf::ImageAlignment::Left);
+    doTest(m_thread, QStringLiteral("different_placing_cases.md"), QString(), 8.0, 8.0, MdPdf::ImageAlignment::Left);
 }
 
 void TestRender::testDescent()
@@ -565,27 +600,22 @@ void TestRender::testDescent()
 
 void TestRender::testSuperSubScript()
 {
-    doTest(QStringLiteral("styles.md"), QString(), 8.0, 8.0, MdPdf::ImageAlignment::Left, true);
+    doTest(m_thread, QStringLiteral("styles.md"), QString(), 8.0, 8.0, MdPdf::ImageAlignment::Left, true);
 }
 
 void TestRender::testSuperSubScriptBigFont()
 {
-    doTest(QStringLiteral("styles.md"), QStringLiteral("_big"), 16.0, 14.0, MdPdf::ImageAlignment::Left, true);
+    doTest(m_thread, QStringLiteral("styles.md"), QStringLiteral("_big"), 16.0, 14.0, MdPdf::ImageAlignment::Left, true);
 }
 
 void TestRender::testEmoji()
 {
-    doTest(QStringLiteral("conan_adding_packages_readme.md"),
-           QString(),
-           8.0,
-           8.0,
-           MdPdf::ImageAlignment::Center,
-           true);
+    doTest(m_thread, QStringLiteral("conan_adding_packages_readme.md"), QString(), 8.0, 8.0, MdPdf::ImageAlignment::Center, true);
 }
 
 void TestRender::testEmojiBigFont()
 {
-    doTest(QStringLiteral("conan_adding_packages_readme.md"),
+    doTest(m_thread, QStringLiteral("conan_adding_packages_readme.md"),
            QStringLiteral("_big"),
            16.0,
            14.0,
@@ -595,7 +625,7 @@ void TestRender::testEmojiBigFont()
 
 void TestRender::testMermaid()
 {
-    doTest(QStringLiteral("mermaid.md"), QString(), 8.0, 8.0, MdPdf::ImageAlignment::Center, false);
+    doTest(m_thread, QStringLiteral("mermaid.md"), QString(), 8.0, 8.0, MdPdf::ImageAlignment::Center, false);
 }
 
 static void registerCustomSchemes()

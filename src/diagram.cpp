@@ -55,9 +55,7 @@ Diagram::Diagram(const QString &fontName,
     , m_monoFontName(monoFontName)
     , m_fontSize(fontSize)
 {
-    connect(m_page, &QWebEnginePage::loadFinished, this, [this](bool ok) {
-        m_loaded = ok;
-    });
+    connect(m_page, &QWebEnginePage::loadFinished, this, &Diagram::onPageLoaded);
 
     m_page->load(QUrl(QStringLiteral("qrc:/js/index.html")));
 }
@@ -69,36 +67,67 @@ int Diagram::fontSize() const
     return m_fontSize;
 }
 
-QString Diagram::convert(const QString &mermaid)
+void Diagram::convert(const QString &mermaid,
+                      QSharedPointer<QPromise<QString>> promise)
 {
-    if (!m_loaded) {
-        QEventLoop loadLoop;
-        auto conn = connect(m_page, &QWebEnginePage::loadFinished, &loadLoop, &QEventLoop::quit);
-        loadLoop.exec();
-        disconnect(conn);
+    if (m_error) {
+        if (promise) {
+            promise->start();
+            promise->addResult(QString());
+            promise->finish();
+        }
+
+        return;
     }
 
-    const QString jsonArray = QString::fromUtf8(QJsonDocument(QJsonArray{mermaid}).toJson(QJsonDocument::Compact));
+    if (!m_loaded) {
+        if (promise) {
+            m_queue.enqueue(std::make_pair(mermaid, promise));
+        }
+
+        return;
+    }
+
+    std::pair<QString, QSharedPointer<QPromise<QString>>> mmd;
+
+    if (!m_queue.isEmpty()) {
+        mmd = m_queue.dequeue();
+    } else {
+        if (promise) {
+            mmd = std::make_pair(mermaid, promise);
+        } else {
+            return;
+        }
+    }
+
+    mmd.second->start();
+
+    const QString jsonArray = QString::fromUtf8(QJsonDocument(QJsonArray{mmd.first}).toJson(QJsonDocument::Compact));
 
     const QString safeJsString = jsonArray.mid(1, jsonArray.length() - 2);
-
-    QEventLoop loop;
-
-    QString svg;
 
     m_page->runJavaScript(QStringLiteral("renderMermaid(%1, '%2', '%3', %4)")
                               .arg(safeJsString)
                               .arg(m_fontName)
                               .arg(m_monoFontName)
                               .arg(m_fontSize),
-                          [&loop, &svg](const QVariant &v) {
-                              svg = v.toString();
-                              loop.quit();
+                          [p = mmd.second](const QVariant &v) {
+                              p->addResult(v.toString());
+                              p->finish();
                           });
+}
 
-    loop.exec();
+void Diagram::onPageLoaded(bool res)
+{
+    if (res) {
+        m_loaded = true;
 
-    return svg;
+        while (!m_queue.isEmpty()) {
+            convert(QString(), nullptr);
+        }
+    } else {
+        m_error = true;
+    }
 }
 
 } /* namespace MdPdf */

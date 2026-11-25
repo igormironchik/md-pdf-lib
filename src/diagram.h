@@ -7,7 +7,12 @@
 
 // Qt include.
 #include <QObject>
+#include <QPromise>
+#include <QQueue>
 #include <QWebEnginePage>
+
+// C++ include.
+#include <utility>
 
 //! Init Qt resources.
 void initMdPdfSharedResources();
@@ -53,13 +58,19 @@ public:
     int fontSize() const;
 
     //! Convert Mermaid diagram into SVG.
-    Q_INVOKABLE QString convert(const QString &mermaid);
+    Q_INVOKABLE void convert(const QString &mermaid,
+                             QSharedPointer<QPromise<QString>> promise);
+
+private Q_SLOTS:
+    void onPageLoaded(bool res);
 
 private:
     Q_DISABLE_COPY(Diagram)
 
+    QQueue<std::pair<QString, QSharedPointer<QPromise<QString>>>> m_queue;
     WebPage *m_page = nullptr;
     bool m_loaded = false;
+    bool m_error = false;
     const QString m_fontName;
     const QString m_monoFontName;
     const int m_fontSize = 16;

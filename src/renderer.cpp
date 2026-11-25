@@ -51,6 +51,8 @@
 #include <QBuffer>
 #include <QDir>
 #include <QDomDocument>
+#include <QFuture>
+#include <QPromise>
 #include <QScopedValueRollback>
 #include <QThread>
 
@@ -108,9 +110,7 @@ void PdfRenderer::render(const QString &fileName,
     m_doc = doc->clone().staticCast<MD::Document>();
     m_opts = opts;
 
-#ifndef MD_PDF_TESTING
     Q_EMIT start();
-#endif
 }
 
 void PdfRenderer::terminate()
@@ -4191,13 +4191,13 @@ PdfRenderer::drawCode(PdfAuxData &pdfData,
     if (item->syntax().toLower() == QStringLiteral("mermaid") || item->syntax().toLower() == QStringLiteral("mmd")) {
         QPair<QVector<WhereDrawn>, WhereDrawn> whereDrawn;
 
-        QString svg;
-        QMetaObject::invokeMethod(
-            pdfData.m_diagram,
-            "convert",
-            (pdfData.m_diagram->thread() != thread() ? Qt::BlockingQueuedConnection : Qt::DirectConnection),
-            qReturnArg(svg),
-            item->text());
+        auto promise = QSharedPointer<QPromise<QString>>::create();
+        auto future = promise->future();
+
+        QMetaObject::invokeMethod(pdfData.m_diagram, "convert", Qt::QueuedConnection, item->text(), promise);
+
+        future.waitForFinished();
+        const auto svg = future.result();
 
         if (!svg.isEmpty()) {
             QTemporaryFile tmp(QDir::tempPath() + QDir::separator() + QStringLiteral("XXXXXXXXX.svg"));
