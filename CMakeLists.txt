@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.19)
 
-project(md-pdf-lib VERSION "1.0.8")
+project(md-pdf-lib VERSION "1.1.0")
 
 set(MD_PDF_LIB_VERSION ${PROJECT_VERSION} PARENT_SCOPE)
 
@@ -38,7 +38,7 @@ endif()
 
 add_compile_definitions(QT_NO_KEYWORDS)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Network)
+find_package(Qt6 REQUIRED COMPONENTS Core Network WebEngineCore Xml)
 
 find_package(ZLIB REQUIRED)
 

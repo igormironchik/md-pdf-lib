@@ -19,7 +19,9 @@ set(LIB_SRC skia_paintdevice.h
     emphasis.cpp
     emoji_parser.h
     emoji_parser.cpp
-    emoji.h)
+    emoji.h
+    diagram.cpp
+    diagram.h)
 	
 qt6_add_resources(LIB_SRC resources.qrc)
 qt6_add_resources(LIB_SRC ../3rdparty/MicroTeX/latex.qrc)
@@ -80,6 +82,9 @@ target_link_libraries(md-pdf-lib
     md4qt::md4qt
     LaTeX
     KF${KF_MAJOR_VERSION}::SyntaxHighlighting
+    Qt6::Qml
+    Qt6::Xml
+    Qt6::WebEngineCore
     Qt6::Network
     Qt6::Core
     bentleyottmann
@@ -129,6 +134,9 @@ if(BUILD_TEST_LIBRARY)
         md4qt::md4qt
         LaTeX
         KF${KF_MAJOR_VERSION}::SyntaxHighlighting
+        Qt6::Qml
+        Qt6::Xml
+        Qt6::WebEngineCore
         Qt6::Network
         Qt6::Core
         Qt6::Test

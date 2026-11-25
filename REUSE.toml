@@ -10,6 +10,12 @@ SPDX-FileCopyrightText = "2026 Igor Mironchik <igor.mironchik@gmail.com>"
 SPDX-License-Identifier = "GPL-3.0-or-later"
 
 [[annotations]]
+path = "src/js/MathJax/**"
+precedence = "override"
+SPDX-FileCopyrightText = "The MathJax Consortium"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
 path = "tests/manual/conan_adding_packages_readme.md"
 precedence = "override"
 SPDX-FileCopyrightText = "2019 Conan.io"
