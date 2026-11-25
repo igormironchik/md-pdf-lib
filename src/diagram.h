@@ -14,9 +14,6 @@
 // C++ include.
 #include <utility>
 
-//! Init Qt resources.
-void initMdPdfSharedResources();
-
 namespace MdPdf
 {
 

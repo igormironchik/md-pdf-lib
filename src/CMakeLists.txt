@@ -23,7 +23,7 @@ set(LIB_SRC skia_paintdevice.h
     diagram.cpp
     diagram.h)
 	
-qt6_add_resources(LIB_SRC resources.qrc)
+qt6_add_resources(LIB_SRC mdpdfresources.qrc)
 qt6_add_resources(LIB_SRC ../3rdparty/MicroTeX/latex.qrc)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}

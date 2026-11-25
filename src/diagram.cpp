@@ -12,11 +12,6 @@
 #include <QJsonDocument>
 #include <QWebEngineSettings>
 
-void initMdPdfSharedResources()
-{
-    Q_INIT_RESOURCE(resources);
-}
-
 namespace MdPdf
 {
 

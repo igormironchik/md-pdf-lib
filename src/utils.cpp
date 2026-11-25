@@ -39,7 +39,7 @@
 
 void mdPdf_initSharedResources()
 {
-    Q_INIT_RESOURCE(resources);
+    Q_INIT_RESOURCE(mdpdfresources);
     Q_INIT_RESOURCE(latex);
 }
 
