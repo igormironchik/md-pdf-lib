@@ -218,6 +218,8 @@ struct RenderOpts {
     QSharedPointer<Syntax> m_syntax;
     //! Image alignment.
     ImageAlignment m_imageAlignment;
+    //! Diagram renderer. Lives in GUI thread.
+    Diagram *m_diagram = nullptr;
 
 #ifdef MD_PDF_TESTING
     bool m_printDrawings = false;
@@ -382,7 +384,7 @@ struct PdfAuxData {
     long long int m_endLine = 0;
     //! End position in the end line.
     long long int m_endPos = 0;
-    //! Diagram render.
+    //! Diagram render. Lives in GUI thread.
     Diagram *m_diagram = nullptr;
     //! Anchors in document.
     QStringList m_anchors;

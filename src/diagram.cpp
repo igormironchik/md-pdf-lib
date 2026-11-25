@@ -31,8 +31,8 @@ WebPage::WebPage(QObject *parent)
 }
 
 bool WebPage::acceptNavigationRequest(const QUrl &url,
-                                          QWebEnginePage::NavigationType /*type*/,
-                                          bool /*isMainFrame*/)
+                                      QWebEnginePage::NavigationType /*type*/,
+                                      bool /*isMainFrame*/)
 {
     if (url.scheme() == QStringLiteral("qrc") || url.scheme() == QStringLiteral("data")) {
         return true;
@@ -48,8 +48,7 @@ bool WebPage::acceptNavigationRequest(const QUrl &url,
 Diagram::Diagram(const QString &fontName,
                  const QString &monoFontName,
                  int fontSize,
-                 QObject *parent,
-                 bool async)
+                 QObject *parent)
     : QObject(parent)
     , m_page(new WebPage(this))
     , m_fontName(fontName)
@@ -61,8 +60,6 @@ Diagram::Diagram(const QString &fontName,
     });
 
     m_page->load(QUrl(QStringLiteral("qrc:/js/index.html")));
-
-    connect(this, &Diagram::convert, this, &Diagram::onStart, (async ? Qt::QueuedConnection : Qt::DirectConnection));
 }
 
 Diagram::~Diagram() = default;
@@ -72,7 +69,7 @@ int Diagram::fontSize() const
     return m_fontSize;
 }
 
-void Diagram::onStart(const QString &mermaid)
+QString Diagram::convert(const QString &mermaid)
 {
     if (!m_loaded) {
         QEventLoop loadLoop;
@@ -87,17 +84,21 @@ void Diagram::onStart(const QString &mermaid)
 
     QEventLoop loop;
 
+    QString svg;
+
     m_page->runJavaScript(QStringLiteral("renderMermaid(%1, '%2', '%3', %4)")
                               .arg(safeJsString)
                               .arg(m_fontName)
                               .arg(m_monoFontName)
                               .arg(m_fontSize),
-                          [this, &loop](const QVariant &v) {
-                              Q_EMIT this->finished(v.toString());
+                          [&loop, &svg](const QVariant &v) {
+                              svg = v.toString();
                               loop.quit();
                           });
 
     loop.exec();
+
+    return svg;
 }
 
 } /* namespace MdPdf */

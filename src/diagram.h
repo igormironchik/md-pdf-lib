@@ -37,38 +37,32 @@ protected:
 //
 
 //! Helper to convert Mermaid diagram into SVG.
+//! This object must live in GUI thread.
 class Diagram : public QObject
 {
     Q_OBJECT
-
-Q_SIGNALS:
-    //! Start converting of Mermaid diagram into SVG.
-    void convert(const QString &mermaid);
-    //! Converting finished.
-    void finished(const QString &svg);
 
 public:
     Diagram(const QString &fontName,
             const QString &monoFontName,
             int fontSize,
-            QObject *parent = nullptr,
-            bool async = false);
+            QObject *parent = nullptr);
     ~Diagram() override;
 
     //! \return Base font size.
     int fontSize() const;
 
-private Q_SLOTS:
-    void onStart(const QString &mermaid);
+    //! Convert Mermaid diagram into SVG.
+    Q_INVOKABLE QString convert(const QString &mermaid);
 
 private:
     Q_DISABLE_COPY(Diagram)
 
     WebPage *m_page = nullptr;
     bool m_loaded = false;
-    QString m_fontName;
-    QString m_monoFontName;
-    int m_fontSize = 16;
+    const QString m_fontName;
+    const QString m_monoFontName;
+    const int m_fontSize = 16;
 }; // class Diagram
 
 } /* namespace MdPdf */

@@ -186,6 +186,9 @@ struct TestRendering {
         opts.m_printDrawings = s_printData;
         opts.m_testDataFileName = s_folder + QStringLiteral("/") + fileName + suffix + QStringLiteral(".data");
 
+        auto diagram = QSharedPointer<Diagram>::create(opts.m_textFont, opts.m_codeFont, 16);
+        opts.m_diagram = diagram.get();
+
         PdfRenderer render;
 
         render.render(QStringLiteral("./") + fileName + suffix + QStringLiteral(".pdf"), doc, opts);

@@ -170,7 +170,7 @@ void PdfRenderer::renderImpl()
         pdfData.m_layout.margins().m_top = m_opts.m_top;
         pdfData.m_layout.margins().m_bottom = m_opts.m_bottom;
 
-        pdfData.m_diagram = new Diagram(m_opts.m_textFont, m_opts.m_codeFont, 16, this);
+        pdfData.m_diagram = m_opts.m_diagram;
 
         pdfData.m_colorsStack.push(Qt::black);
 
@@ -4189,45 +4189,44 @@ PdfRenderer::drawCode(PdfAuxData &pdfData,
                       double scale)
 {
     if (item->syntax().toLower() == QStringLiteral("mermaid") || item->syntax().toLower() == QStringLiteral("mmd")) {
-        disconnect(pdfData.m_diagram, &Diagram::finished, this, 0);
-
-        auto drawn = false;
         QPair<QVector<WhereDrawn>, WhereDrawn> whereDrawn;
 
-        connect(pdfData.m_diagram, &Diagram::finished, this, [&](const QString &svg) {
-            if (!svg.isEmpty()) {
-                QTemporaryFile tmp(QDir::tempPath() + QDir::separator() + QStringLiteral("XXXXXXXXX.svg"));
+        QString svg;
+        QMetaObject::invokeMethod(
+            pdfData.m_diagram,
+            "convert",
+            (pdfData.m_diagram->thread() != thread() ? Qt::BlockingQueuedConnection : Qt::DirectConnection),
+            qReturnArg(svg),
+            item->text());
 
-                if (tmp.open()) {
-                    tmp.write(svg.toUtf8());
-                    tmp.close();
+        if (!svg.isEmpty()) {
+            QTemporaryFile tmp(QDir::tempPath() + QDir::separator() + QStringLiteral("XXXXXXXXX.svg"));
 
-                    MD::Paragraph p;
-                    p.setStartColumn(item->startColumn());
-                    p.setStartLine(item->startLine());
-                    p.setEndColumn(item->endColumn());
-                    p.setEndLine(item->endLine());
+            if (tmp.open()) {
+                tmp.write(svg.toUtf8());
+                tmp.close();
 
-                    auto img = QSharedPointer<MD::Image>::create();
-                    img->setOpts(s_mermaidImage);
-                    img->setUrl(tmp.fileName());
-                    img->setStartColumn(item->startColumn());
-                    img->setStartLine(item->startLine());
-                    img->setEndColumn(item->endColumn());
-                    img->setEndLine(item->endLine());
+                MD::Paragraph p;
+                p.setStartColumn(item->startColumn());
+                p.setStartLine(item->startLine());
+                p.setEndColumn(item->endColumn());
+                p.setEndLine(item->endLine());
 
-                    p.appendItem(img);
+                auto img = QSharedPointer<MD::Image>::create();
+                img->setOpts(s_mermaidImage);
+                img->setUrl(tmp.fileName());
+                img->setStartColumn(item->startColumn());
+                img->setStartLine(item->startLine());
+                img->setEndColumn(item->endColumn());
+                img->setEndLine(item->endLine());
 
-                    drawn = true;
+                p.appendItem(img);
 
-                    whereDrawn = drawParagraph(pdfData, &p, doc, offset, true, heightCalcOpt, scale);
-                }
+                whereDrawn = drawParagraph(pdfData, &p, doc, offset, true, heightCalcOpt, scale);
             }
-        });
+        }
 
-        Q_EMIT pdfData.m_diagram->convert(item->text());
-
-        if (drawn) {
+        if (!whereDrawn.first.isEmpty()) {
             return whereDrawn;
         }
     }
