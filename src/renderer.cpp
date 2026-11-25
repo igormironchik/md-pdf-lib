@@ -3681,6 +3681,17 @@ void replaceVarsInNode(QDomNode node,
                 if (vars.contains(val)) {
                     attr.setValue(vars[val]);
                 }
+
+                if (attr.name() == QStringLiteral("xml:space")) {
+                    elem.removeAttribute(attr.name());
+                } else if (attr.name() == QStringLiteral("style")) {
+                    auto value = attr.value();
+
+                    value.replace(QStringLiteral("rx:var(--_r)"),
+                                  QStringLiteral("rx:%1").arg(vars[QStringLiteral("r")]));
+
+                    attr.setValue(value);
+                }
             }
         }
 
@@ -3726,6 +3737,7 @@ QByteArray prepareSvg(const QByteArray &a,
         if (!shortName.isEmpty()) {
             vars.insert(QStringLiteral("var(--_") + shortName + QStringLiteral(")"), value);
             vars.insert(QStringLiteral("--_") + shortName, value);
+            vars.insert(shortName, value);
         }
     };
 
@@ -3759,6 +3771,7 @@ QByteArray prepareSvg(const QByteArray &a,
     addVar(QLatin1String("font"), opts.m_textFont);
     addVar(QLatin1String("font-mono"), opts.m_codeFont, QLatin1String("fm"));
     addVar(QLatin1String("title-weight"), QStringLiteral("bold"));
+    addVar(QLatin1String("bold-weight"), QStringLiteral("bold"), QLatin1String("w"));
     addVar(QLatin1String("heading-weight"), QStringLiteral("bold"));
     addVar(QLatin1String("bold-weight"), QStringLiteral("bold"));
     addVar(QLatin1String("radius"), QStringLiteral("4px"), QLatin1String("r"));

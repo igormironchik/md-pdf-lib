@@ -605,17 +605,30 @@ void TestRender::testSuperSubScript()
 
 void TestRender::testSuperSubScriptBigFont()
 {
-    doTest(m_thread, QStringLiteral("styles.md"), QStringLiteral("_big"), 16.0, 14.0, MdPdf::ImageAlignment::Left, true);
+    doTest(m_thread,
+           QStringLiteral("styles.md"),
+           QStringLiteral("_big"),
+           16.0,
+           14.0,
+           MdPdf::ImageAlignment::Left,
+           true);
 }
 
 void TestRender::testEmoji()
 {
-    doTest(m_thread, QStringLiteral("conan_adding_packages_readme.md"), QString(), 8.0, 8.0, MdPdf::ImageAlignment::Center, true);
+    doTest(m_thread,
+           QStringLiteral("conan_adding_packages_readme.md"),
+           QString(),
+           8.0,
+           8.0,
+           MdPdf::ImageAlignment::Center,
+           true);
 }
 
 void TestRender::testEmojiBigFont()
 {
-    doTest(m_thread, QStringLiteral("conan_adding_packages_readme.md"),
+    doTest(m_thread,
+           QStringLiteral("conan_adding_packages_readme.md"),
            QStringLiteral("_big"),
            16.0,
            14.0,

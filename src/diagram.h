@@ -18,7 +18,7 @@ namespace MdPdf
 {
 
 //! \return Mermaid allowed syntaxes.
-inline const QStringList& mermaidSyntax()
+inline const QStringList &mermaidSyntax()
 {
     static const QStringList list = {QStringLiteral("mmd"), QStringLiteral("mermaid")};
     return list;
