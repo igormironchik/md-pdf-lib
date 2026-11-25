@@ -515,10 +515,6 @@ void PdfRenderer::renderImpl()
         handleException(pdfData, QStringLiteral("Error during drawing PDF."));
     }
 
-    if (pdfData.m_diagram) {
-        pdfData.m_diagram->deleteLater();
-    }
-
     deleteLater();
 }
 
