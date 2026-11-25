@@ -4188,7 +4188,7 @@ PdfRenderer::drawCode(PdfAuxData &pdfData,
                       CalcHeightOpt heightCalcOpt,
                       double scale)
 {
-    if (item->syntax().toLower() == QStringLiteral("mermaid") || item->syntax().toLower() == QStringLiteral("mmd")) {
+    if (mermaidSyntax().contains(item->syntax().toLower().trimmed())) {
         QPair<QVector<WhereDrawn>, WhereDrawn> whereDrawn;
 
         auto promise = QSharedPointer<QPromise<QString>>::create();
