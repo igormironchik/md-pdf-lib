@@ -601,6 +601,8 @@ static void registerCustomSchemes()
     qrc.setFlags(QWebEngineUrlScheme::CorsEnabled | QWebEngineUrlScheme::FetchApiAllowed);
     qrc.setSyntax(QWebEngineUrlScheme::Syntax::Path);
     QWebEngineUrlScheme::registerScheme(qrc);
+
+    initMdPdfSharedResources();
 }
 
 Q_CONSTRUCTOR_FUNCTION(registerCustomSchemes)

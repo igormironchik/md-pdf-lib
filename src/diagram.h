@@ -9,6 +9,9 @@
 #include <QObject>
 #include <QWebEnginePage>
 
+//! Init Qt resources.
+void initMdPdfSharedResources();
+
 namespace MdPdf
 {
 
