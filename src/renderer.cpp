@@ -51,6 +51,7 @@
 #include <QBuffer>
 #include <QDir>
 #include <QDomDocument>
+#include <QDomText>
 #include <QFuture>
 #include <QPromise>
 #include <QScopedValueRollback>
@@ -553,17 +554,22 @@ Font PdfRenderer::createFont(const QString &name,
         typeface = pdfData.m_typefaceCache[internalName];
     } else {
 #ifdef MD_PDF_TESTING
-        typeface = pdfData.m_fontMgr->makeFromFile(pdfData.m_fonts[internalName].toLocal8Bit().data());
-#else
-        SkFontStyle::Slant slant = italic ? SkFontStyle::kItalic_Slant : SkFontStyle::kUpright_Slant;
-        int weight = bold ? SkFontStyle::kBold_Weight : SkFontStyle::kNormal_Weight;
+        if (pdfData.m_fonts.contains(internalName)) {
+            typeface = pdfData.m_fontMgr->makeFromFile(pdfData.m_fonts[internalName].toLocal8Bit().data());
 
-        SkFontStyle style(weight, SkFontStyle::kNormal_Width, slant);
-
-        typeface = pdfData.m_fontMgr->matchFamilyStyle(name.toLocal8Bit().data(), style);
-
-        pdfData.m_typefaceCache.insert(internalName, typeface);
+            pdfData.m_typefaceCache.insert(internalName, typeface);
+        }
 #endif
+        if (!typeface) {
+            SkFontStyle::Slant slant = italic ? SkFontStyle::kItalic_Slant : SkFontStyle::kUpright_Slant;
+            int weight = bold ? SkFontStyle::kBold_Weight : SkFontStyle::kNormal_Weight;
+
+            SkFontStyle style(weight, SkFontStyle::kNormal_Width, slant);
+
+            typeface = pdfData.m_fontMgr->matchFamilyStyle(name.toLocal8Bit().data(), style);
+
+            pdfData.m_typefaceCache.insert(internalName, typeface);
+        }
     }
 
     return SkFont(typeface, size);
@@ -3665,9 +3671,82 @@ ParagraphAlignment imageToParagraphAlignment(ImageAlignment alignment)
     }
 }
 
+void fallbackFonts(QDomText text,
+                   QDomDocument doc,
+                   const QString &currentFamily,
+                   PdfAuxData &pdfData)
+{
+    auto iter = pdfData.m_unicode->makeBreakIterator(SkUnicode::BreakType::kGraphemes);
+    const auto utf8 = createUtf8String(text.data());
+    iter->setText(utf8.data.data(), utf8.data.size());
+
+    auto font = PdfRenderer::createFont(currentFamily, false, false, 10.0, pdfData);
+    SkString defaultFamily;
+    font.getTypeface()->getFamilyName(&defaultFamily);
+
+    QString tmp;
+    bool dirty = false;
+
+    do {
+        const auto startPos = iter->current();
+        const auto endPos = iter->next();
+
+        if (iter->isDone()) {
+            break;
+        }
+
+        if (dirty) {
+            dirty = false;
+
+            text = text.parentNode().appendChild(doc.createTextNode(QString())).toText();
+        }
+
+        const auto grapheme = QString::fromUtf8(utf8.data.sliced(startPos, endPos - startPos));
+        const auto ucs4 = grapheme.toUcs4();
+
+        sk_sp<SkTypeface> typeface = font.refTypeface();
+
+        if (!font.unicharToGlyph(ucs4[0])) {
+            typeface = pdfData.m_fontMgr->matchFamilyStyleCharacter(nullptr,
+                                                                    font.getTypeface()->fontStyle(),
+                                                                    nullptr,
+                                                                    0,
+                                                                    ucs4[0]);
+
+            if (!typeface) {
+                typeface = font.refTypeface();
+            }
+        }
+
+        SkString fontFamilyCurrent;
+        typeface->getFamilyName(&fontFamilyCurrent);
+
+        if (defaultFamily != fontFamilyCurrent) {
+            text.setData(tmp);
+            tmp.clear();
+
+            QDomElement tspan = doc.createElement(QStringLiteral("tspan"));
+            tspan.appendChild(doc.createTextNode(QString::fromUcs4(ucs4.data(), ucs4.size())));
+            tspan.setAttribute(QStringLiteral("font-family"),
+                               QString::fromUtf8(fontFamilyCurrent.data(), fontFamilyCurrent.size()));
+
+            text.parentNode().insertAfter(tspan, text);
+            dirty = true;
+        } else {
+            tmp.append(QString::fromUcs4(ucs4.data(), ucs4.size()));
+        }
+    } while (true);
+
+    if (!tmp.isEmpty()) {
+        text.setData(tmp);
+    }
+}
+
 void replaceVarsInNode(QDomNode node,
                        const QMap<QString,
-                                  QString> &vars)
+                                  QString> &vars,
+                       PdfAuxData &pdfData,
+                       QDomDocument doc)
 {
     while (!node.isNull()) {
         if (node.isElement()) {
@@ -3693,10 +3772,28 @@ void replaceVarsInNode(QDomNode node,
                     attr.setValue(value);
                 }
             }
+
+            if (elem.tagName() == QStringLiteral("tspan") && elem.firstChild().isText()) {
+                auto family = vars[QStringLiteral("font")];
+
+                static const QString familyAttr = QStringLiteral("font-family");
+
+                if (elem.hasAttribute(familyAttr)) {
+                    family = elem.attribute(familyAttr);
+
+                    const auto i = family.indexOf(QLatin1Char(','));
+
+                    if (i != -1) {
+                        family = family.sliced(0, i);
+                    }
+                }
+
+                fallbackFonts(elem.firstChild().toText(), doc, family, pdfData);
+            }
         }
 
         if (node.hasChildNodes()) {
-            replaceVarsInNode(node.firstChild(), vars);
+            replaceVarsInNode(node.firstChild(), vars, pdfData, doc);
         }
 
         node = node.nextSibling();
@@ -3715,7 +3812,8 @@ void prepareStyle(QDomElement &elem,
 
 QByteArray prepareSvg(const QByteArray &a,
                       const RenderOpts &opts,
-                      int fontSize)
+                      int fontSize,
+                      PdfAuxData &pdfData)
 {
     QDomDocument doc;
 
@@ -3788,7 +3886,7 @@ QByteArray prepareSvg(const QByteArray &a,
     docElem.setAttribute(QStringLiteral("style"), QString());
     prepareStyle(docElem, vars, fontSize);
 
-    replaceVarsInNode(docElem, vars);
+    replaceVarsInNode(docElem, vars, pdfData, doc);
 
     return doc.toByteArray();
 }
@@ -3870,7 +3968,7 @@ PdfRenderer::drawImage(PdfAuxData &pdfData,
             QByteArray imgData;
 
             if (item->opts() == s_mermaidImage) {
-                imgData = prepareSvg(img, m_opts, pdfData.m_diagram->fontSize());
+                imgData = prepareSvg(img, m_opts, pdfData.m_diagram->fontSize(), pdfData);
             } else {
                 imgData = img;
             }

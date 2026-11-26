@@ -69,6 +69,13 @@ public:
     PdfRenderer();
     ~PdfRenderer() override = default;
 
+    //! Create font.
+    static Font createFont(const QString &name,
+                           bool bold,
+                           bool italic,
+                           double size,
+                           PdfAuxData &pdfData);
+
 public Q_SLOTS:
     //! Render document.
     //! Renderer will delete himself on job finish.
@@ -89,13 +96,6 @@ private:
     friend struct TestRendering;
     bool isError() const;
 #endif
-
-    //! Create font.
-    Font createFont(const QString &name,
-                    bool bold,
-                    bool italic,
-                    double size,
-                    PdfAuxData &pdfData);
 
     //! Create new page.
     void createPage(PdfAuxData &pdfData);

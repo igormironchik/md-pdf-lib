@@ -44,8 +44,9 @@ void Syntax::init()
 
     const auto th = m_repository.themes();
 
-    for (const auto &t : th)
+    for (const auto &t : th) {
         m_themes.insert(t.name(), t);
+    }
 }
 
 Syntax::Syntax()
